@@ -1,7 +1,10 @@
 import { Capacitor } from '@capacitor/core';
+import { App as CapApp } from '@capacitor/app';
+import { Browser } from '@capacitor/browser';
 import { PushNotifications } from '@capacitor/push-notifications';
 import { supabase } from './supabase.js';
 import './style.css';
+import NearbyVehicleMap from './src/VehicleMap.jsx';
 import React, { useState, useEffect } from 'react';
 import { createRoot } from 'react-dom/client';
 
@@ -165,6 +168,7 @@ function App() {
   const [adminUsersSearch, setAdminUsersSearch] = useState('');
   const [adminPayments, setAdminPayments] = useState([]);
   const [adminDisputes, setAdminDisputes] = useState([]);
+  const [adminSupportPendingCount, setAdminSupportPendingCount] = useState(null);
   const [adminBookings, setAdminBookings] = useState([]);
   const [adminOperationsMessage, setAdminOperationsMessage] = useState('');
   const [adminOperationsSearch, setAdminOperationsSearch] = useState('');
@@ -285,14 +289,14 @@ function App() {
         if (ae || !auth.user) return;
         const { data, error } = await supabase
           .from('load_profiles')
-          .select('display_name, phone, email, address, account_status, photo_path')
+          .select('display_name, phone, email, account_status, photo_path')
           .eq('user_id', auth.user.id)
           .maybeSingle();
         if (error) throw error;
         if (!active) return;
         setProfileName(data?.display_name || '');
         setProfilePhone(data?.phone || '');
-        setProfileAddress(data?.address || '');
+        setProfileAddress('');
         setProfileEmail(auth.user.email || data?.email || '');
         setProfileStatus(data?.account_status || 'active');
         if (data?.photo_path) {
@@ -355,6 +359,22 @@ function App() {
       }
     };
     finishLogin();
+    const appUrlListener = CapApp.addListener('appUrlOpen', async ({ url }) => {
+      if (!url || !url.startsWith('com.load.logistics://login-callback')) return;
+      try {
+        await Browser.close();
+        const callbackUrl = new URL(url);
+        const code = callbackUrl.searchParams.get('code');
+        if (!code) {
+          setAuthMessage('Google Login पूरा भएन। फेरि प्रयास गर्नुहोस्।');
+          return;
+        }
+        const { error } = await supabase.auth.exchangeCodeForSession(code);
+        if (error) setAuthMessage('Google Login समस्या: ' + error.message);
+      } catch (error) {
+        setAuthMessage('Google Login समस्या: ' + error.message);
+      }
+    });
     const { data: { subscription } } = supabase.auth.onAuthStateChange(
       (event, session) => {
         if (event === 'PASSWORD_RECOVERY') {
@@ -371,13 +391,13 @@ function App() {
         }
       }
     );
-    return () => subscription.unsubscribe();
+    return () => { subscription.unsubscribe(); appUrlListener.then(listener => listener.remove()); };
   }, []);
 
 
   // LOAD_NOTIFICATIONS_EFFECT
   useEffect(() => {
-    if (page !== 'notifications') return;
+
     let active = true;
     let channel;
     (async () => {
@@ -779,7 +799,7 @@ function App() {
 
   const { data: userRows, error: userRowsError } = await supabase
     .from('load_profiles')
-    .select('user_id,display_name,phone,email,address,account_status')
+    .select('user_id,display_name,phone,email,account_status')
     .order('display_name', { ascending: true }).limit(300);
   if (!active) return;
   if (userRowsError) setAdminOperationsMessage('प्रयोगकर्ता सूची लोड भएन: ' + userRowsError.message);
@@ -804,6 +824,15 @@ function App() {
       const { data: applications, error: applicationsError } = await supabase.from('admin_applications').select('id,user_id,full_name,email,phone,id_type,id_number,photo_path,document_front_path,document_back_path,application_reason,work_plan,status,admin_note,created_at').order('created_at',{ascending:false});
       if (applicationsError) setAdminApplicationsMessage('आवेदन लोड भएन: ' + applicationsError.message);
       else setAdminApplications(applications || []);
+    const { data: supportRows, error: supportCountError } = await supabase
+      .from('support_conversations').select('id,status');
+    if (!active) return;
+    if (!supportCountError) setAdminSupportPendingCount(
+      (supportRows || []).filter(x =>
+        !['resolved','closed'].includes(String(x.status || '').toLowerCase())
+      ).length
+    );
+
     const { data: stats, error: statsError } = await supabase.rpc('admin_dashboard_stats');
     if (!active) return;
     if (statsError) setAdminKycMessage('तथ्याङ्क लोड भएन: ' + statsError.message);
@@ -894,7 +923,7 @@ function App() {
         <div style={{display:'flex',alignItems:'center',gap:12,margin:'0 0 14px',color:'#dce7f2',fontSize:12}}>
           <div style={{height:1,background:'#ffffff45',flex:1}}></div><span>वा Google प्रयोग गर्नुहोस्</span><div style={{height:1,background:'#ffffff45',flex:1}}></div>
         </div>
-        <button type="button" onClick={async () => {const {error}=await supabase.auth.signInWithOAuth({provider:'google',options:{redirectTo:window.location.origin}});if(error)setAuthMessage('Google Login समस्या: '+error.message);}} style={{width:'100%',padding:15,border:'1px solid #ffffff60',borderRadius:12,background:'#fff',color:'#102b46',fontSize:16,fontWeight:700}}>Google बाट लगइन गर्नुहोस्</button>
+        <button type="button" onClick={async () => {const {data,error}=await supabase.auth.signInWithOAuth({provider:'google',options:{redirectTo:'com.load.logistics://login-callback',skipBrowserRedirect:true}});if(error)setAuthMessage('Google Login समस्या: '+error.message);else if(data?.url)await Browser.open({url:data.url});}} style={{width:'100%',padding:15,border:'1px solid #ffffff60',borderRadius:12,background:'#fff',color:'#102b46',fontSize:16,fontWeight:700}}>Google बाट लगइन गर्नुहोस्</button>
         {authMessage && <p style={{color:'#ffd6a8',fontSize:13,textAlign:'center'}}>{authMessage}</p>}
       </div>
     </div>
@@ -1013,11 +1042,12 @@ function App() {
         <button type="button"
           onClick={async () => {
             localStorage.setItem('load_role', role);
-            const { error } = await supabase.auth.signInWithOAuth({
+            const { data, error } = await supabase.auth.signInWithOAuth({
               provider: 'google',
-              options: { redirectTo: window.location.origin }
+              options: { redirectTo: 'com.load.logistics://login-callback', skipBrowserRedirect: true }
             });
             if (error) setAuthMessage('Google Login समस्या: ' + error.message);
+            else if (data?.url) await Browser.open({ url: data.url });
           }}
           style={{display:'block',width:'100%',padding:15,margin:'12px 0',
             border:'1px solid #cbd5e1',borderRadius:10,background:'#fff',
@@ -1230,6 +1260,32 @@ function App() {
   };
 
 
+  const decideLoadBooking = async (booking, accept) => {
+    try {
+      const { data: auth, error: authError } = await supabase.auth.getUser();
+      if (authError || !auth.user) throw new Error("पहिले लगइन गर्नुहोस्।");
+      if (auth.user.id !== booking.customer_id) {
+        throw new Error("यो बुकिङको निर्णय गर्ने अनुमति छैन।");
+      }
+      if (booking.status !== "open") {
+        throw new Error("यो बुकिङको निर्णय पहिले नै भइसकेको छ।");
+      }
+
+      const { data, error } = await supabase.rpc("decide_load_booking", {
+        p_booking_id: booking.id,
+        p_accept: accept
+      });
+      if (error) throw error;
+
+      setBookings(prev => prev.map(b => b.id === booking.id
+        ? { ...b, status: accept ? "accepted" : "rejected" }
+        : b));
+      setMessage(data || (accept ? "बुकिङ स्वीकार भयो।" : "बुकिङ अस्वीकार भयो।"));
+    } catch (err) {
+      setMessage("बुकिङको निर्णय भएन: " + (err.message || "फेरि प्रयास गर्नुहोस्।"));
+    }
+  };
+
   const sendChatText = async (body) => {
     if (!body.trim() || !selectedBooking) return;
     try {
@@ -1369,7 +1425,7 @@ function App() {
         if (upErr) throw upErr;
         setProfilePhotoUrl(supabase.storage.from('load-profile-photos').getPublicUrl(photoPath).data.publicUrl);
       }
-      const row = { user_id: uid, display_name: profileName, phone: profilePhone.trim(), address: profileAddress.trim(),
+      const row = { user_id: uid, display_name: profileName, phone: profilePhone.trim(),
         email: auth.user.email || profileEmail.trim(),
         account_status: profileStatus, updated_at: new Date().toISOString() };
       if (photoPath) row.photo_path = photoPath;
@@ -1404,9 +1460,10 @@ function App() {
         <div><h1>Load</h1><small>LOGISTICS & CARGO</small></div>
         <span className="truck">🚛</span>
         <div style={{display:'flex',gap:8,marginLeft:'auto',position:'relative'}}>
-          <button type="button" aria-label="मुख्य मेनु" onClick={() => {setMainMenuOpen(!mainMenuOpen);setLanguageMenuOpen(false);}} style={{fontSize:27,border:0,borderRadius:10,padding:'4px 12px',background:'#102b46',color:'white'}}>⋮</button>
+          <button type="button" aria-label="सूचनाहरू" onClick={() => go('notifications')} style={{position:'relative',fontSize:23,border:0,borderRadius:10,padding:'6px 10px',background:'#102b46',color:'white'}}>🔔{notifications.filter(n => !n.is_read).length > 0 && <span style={{position:'absolute',top:-5,right:-5,minWidth:20,height:20,padding:'0 4px',boxSizing:'border-box',borderRadius:12,background:'#e00000',color:'white',fontSize:10,fontWeight:'bold',display:'flex',alignItems:'center',justifyContent:'center',border:'1px solid white'}}>{notifications.filter(n => !n.is_read).length <= 5 ? notifications.filter(n => !n.is_read).length : Math.floor((notifications.filter(n => !n.is_read).length - 1) / 5) * 5 + '+'}</span>}</button>
+          <button type="button" aria-label="मुख्य मेनु"  onClick={() => {setMainMenuOpen(!mainMenuOpen);setLanguageMenuOpen(false);}} style={{fontSize:27,border:0,borderRadius:10,padding:'4px 12px',background:'#102b46',color:'white'}}>⋮</button>
           {mainMenuOpen && <div style={{position:'absolute',right:0,top:'110%',zIndex:10000,width:235,maxHeight:'75vh',overflowY:'auto',background:'white',color:'#102b46',borderRadius:12,boxShadow:'0 4px 18px #0005',padding:6}}>
-            {[['settings-account','👤','Account'],['settings-privacy','🔐','Privacy'],['settings-lists','📋','Lists'],['settings-notifications','🔔','Notifications'],['settings-storage','💾','Storage and Data'],['settings-language','🌐','App Language'],['settings-help','❓','Help'],['settings-city','📍','City'],['settings-history','🕘','Request History']].map(([key,icon,label]) => <button key={key} type="button" onClick={() => {if(key==='settings-language'){setLanguageMenuOpen(!languageMenuOpen);}else{setMainMenuOpen(false);setLanguageMenuOpen(false);go(key);}}} style={{display:'block',width:'100%',textAlign:'left',padding:'12px 10px',border:0,borderRadius:8,background:'white',color:'#102b46',fontSize:15}}>{icon} {label}</button>)}
+            {[['settings-account','👤','Account'],['settings-privacy','🔐','Privacy'],['settings-lists','📋','Lists'],['settings-storage','💾','Storage and Data'],['settings-language','🌐','App Language'],['settings-help','❓','Help'],['settings-city','📍','City'],['settings-history','🕘','Request History']].map(([key,icon,label]) => <button key={key} type="button" onClick={() => {if(key==='settings-language'){setLanguageMenuOpen(!languageMenuOpen);}else{setMainMenuOpen(false);setLanguageMenuOpen(false);go(key);}}} style={{display:'block',width:'100%',textAlign:'left',padding:'12px 10px',border:0,borderRadius:8,background:'white',color:'#102b46',fontSize:15}}>{icon} {label}</button>)}
             {languageMenuOpen && <div style={{padding:6,background:'#eef3f8',borderRadius:10}}>{[['नेपाली','🇳🇵'],['English','🇬🇧'],['हिन्दी','🇮🇳'],['中文','🇨🇳']].map(([name,flag]) => <button key={name} type="button" onClick={() => {setLanguage(name);setLanguageMenuOpen(false);setMainMenuOpen(false);}} style={{display:'block',width:'100%',textAlign:'left',padding:10,border:0,borderRadius:8,background:language===name?'#d8e7f5':'transparent',color:'#102b46'}}>{flag} {name}</button>)}</div>}
             <button type="button" onClick={() => {setMainMenuOpen(false);logout();}} style={{display:'block',width:'100%',textAlign:'left',padding:'12px 10px',border:0,borderTop:'1px solid #ddd',background:'white',color:'#c62828',fontSize:15}}>🚪 Logout</button>
           </div>}
@@ -1436,6 +1493,7 @@ function App() {
             </button>
           ))}
         </div>
+        <NearbyVehicleMap />
       </>}
 
       {page === 'profile' && <form onSubmit={saveProfile} className="panel">
@@ -1508,8 +1566,13 @@ function App() {
                 cancelled: '❌ बुकिङ रद्द भयो',
                 open: '🟡 बुकिङ अनुरोध पठाइएको',
                 accepted: '🔵 बुकिङ स्वीकार भयो',
+                rejected: '❌ बुकिङ अस्वीकार भयो',
                 in_transit: '🛣️ सामान ढुवानी हुँदैछ'
               }[b.status] || b.status}</p>
+              {b.status === 'open' && currentUserId === b.customer_id && <div>
+                <button type="button" className="primary" onClick={() => decideLoadBooking(b, true)}>बुकिङ स्वीकार गर्नुहोस्</button>
+                <button type="button" onClick={() => decideLoadBooking(b, false)}>बुकिङ अस्वीकार गर्नुहोस्</button>
+              </div>}
               {b.cancellation_reason && <p>रद्द गर्ने कारण: {b.cancellation_reason}</p>}
               {b.cancellation_status === 'requested' && <p>रद्द अनुरोधको निर्णय बाँकी छ।</p>}
               {b.cancellation_status === 'requested' && b.cancelled_by !== currentUserId && <div>
@@ -1693,7 +1756,7 @@ function App() {
         {['settings-admin-dashboard','settings-admin-applications','settings-admin-kyc','settings-admin-support','settings-admin-loads','settings-admin-bookings','settings-admin-users','settings-admin-payments','settings-admin-disputes','settings-admin-settings'].includes(page) && <>
           <h3>{({'settings-admin-dashboard':'Admin Dashboard / प्रशासक ड्यासबोर्ड','settings-admin-applications':'Admin Applications / प्रशासक आवेदन','settings-admin-kyc':'User KYC / प्रयोगकर्ता प्रमाणिकरण','settings-admin-support':'Customer Support / ग्राहक सहायता','settings-admin-loads':'Loads / ढुवानी','settings-admin-bookings':'Bookings / बुकिङ','settings-admin-users':'User Management / प्रयोगकर्ता व्यवस्थापन','settings-admin-payments':'Payments / भुक्तानी','settings-admin-disputes':'Disputes / विवाद','settings-admin-settings':'Settings / सेटिङ'})[page]}</h3>
             <div className="admin-nav">
-              { [['settings-admin-dashboard','Dashboard'],['settings-admin-applications','Admin Applications'],['settings-admin-kyc','User KYC'],['settings-admin-support','Customer Support'],['settings-admin-loads','Loads / ढुवानी'],['settings-admin-bookings','Bookings / बुकिङ'],['settings-admin-users','User Management'],['settings-admin-payments','Payments / भुक्तानी'],['settings-admin-disputes','Disputes / विवाद'],['settings-admin-settings','Settings / सेटिङ']].map(([key,label])=><button key={key} type="button" onClick={()=>go(key)}>{label}</button>)}
+              {[['settings-admin-dashboard','Dashboard',0],['settings-admin-applications','Admin Applications',adminApplications.filter(a=>String(a.status||'').toLowerCase()==='pending').length],['settings-admin-kyc','User KYC',adminKyc.filter(k=>String(k.status||'').toLowerCase()==='pending').length],['settings-admin-support','Customer Support',adminSupportPendingCount],['settings-admin-loads','Loads / ढुवानी',adminLoads.filter(l=>String(l.status||'').toLowerCase()==='open').length],['settings-admin-bookings','Bookings / बुकिङ',adminBookings.filter(b=>String(b.status||'').toLowerCase()==='pending'||['pending','requested'].includes(String(b.cancellation_status||'').toLowerCase())).length],['settings-admin-users','User Management',adminUsers.filter(u=>String(u.account_status||'').toLowerCase()==='inactive').length],['settings-admin-payments','Payments / भुक्तानी',adminPayments.filter(x=>!['completed','paid','success','succeeded','refunded','cancelled','canceled'].includes(String(x.status||'').toLowerCase())).length],['settings-admin-disputes','Disputes / विवाद',adminDisputes.filter(x=>['open','investigating','pending'].includes(String(x.status||'').toLowerCase())).length],['settings-admin-settings','Settings / सेटिङ',0]].map(([key,label,count])=><button key={key} type="button" onClick={()=>go(key)} style={{position:'relative',paddingRight:Number.isFinite(count)&&count>0?38:12}}>{label}{Number.isFinite(count)&&count>0&&<span style={{position:'absolute',top:3,right:4,minWidth:20,height:20,padding:'0 4px',boxSizing:'border-box',borderRadius:12,background:'#e00000',color:'white',fontSize:10,fontWeight:700,display:'inline-flex',alignItems:'center',justifyContent:'center'}}>{count<=5?count:Math.floor((count-1)/5)*5+'+'}</span>}</button>)}
             </div>
             {page === 'settings-admin-dashboard' && isAppAdmin && <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(140px,1fr))',gap:12,margin:'16px 0'}}>
               {[['कुल Loads',adminLoads.length],['कुल Bookings',adminBookings.length],['खुला Loads',adminLoads.filter(x=>x.status==='open').length],['रद्द अनुरोध',adminBookings.filter(x=>['pending','requested'].includes(String(x.cancellation_status||'').toLowerCase())).length]].map(([label,count])=><div key={label} style={{padding:16,border:'1px solid #dce5ef',borderRadius:12,background:'#f7f9fc'}}><div style={{color:'#52657a',fontSize:14}}>{label}</div><strong style={{fontSize:28,color:'#102b46'}}>{count}</strong></div>)}
@@ -1942,8 +2005,8 @@ function App() {
         </>}
         {page === 'settings-notifications' && <>
           <h3>Notifications / सूचनाहरू</h3>
-          <p>लोड, बुकिङ र खातासम्बन्धी सूचनाहरू यहाँ देखाइनेछन्।</p>
-          <p>Push notification सेवा जोड्न बाँकी छ।</p>
+          <p>लोड, बुकिङ र खातासम्बन्धी सूचनाहरू यहाँ हेर्नुहोस्।</p>
+          <button type="button" onClick={() => go('notifications')} style={{padding:'12px 16px',border:0,borderRadius:8,background:'#FF6500',color:'white'}}>🔔 सूचनाहरू हेर्नुहोस्</button>
         </>}
         {page === 'settings-storage' && <>
           <h3>Storage and Data / डाटा</h3>
