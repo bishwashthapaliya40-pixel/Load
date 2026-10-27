@@ -1,4 +1,5 @@
 import { Capacitor } from '@capacitor/core';
+import { Geolocation } from '@capacitor/geolocation';
 import { App as CapApp } from '@capacitor/app';
 import { Browser } from '@capacitor/browser';
 import { PushNotifications } from '@capacitor/push-notifications';
@@ -175,13 +176,20 @@ function App() {
   const [adminOperationsFilter, setAdminOperationsFilter] = useState('all');
 
   const [loads, setLoads] = useState([]);
+  const [clockNow, setClockNow] = useState(Date.now());
+
+  useEffect(() => {
+    const timer = setInterval(() => setClockNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, []);
 
   useEffect(() => {
     const fetchLoads = async () => {
       const { data, error } = await supabase
         .from('loads')
-        .select('id, owner_id, origin, destination, cargo, weight, proposed_price, status, created_at')
+        .select('id, owner_id, origin, destination, cargo, weight, proposed_price, status, created_at, expires_at')
         .eq('status', 'open')
+        .gt('expires_at', new Date().toISOString())
         .order('created_at', { ascending: false });
       if (!error && data) {
         setLoads(data.map(l => ({
@@ -191,17 +199,20 @@ function App() {
       }
     };
     fetchLoads();
+    const refreshTimer = setInterval(fetchLoads, 30000);
+    return () => clearInterval(refreshTimer);
   }, []);
   const [form, setForm] = useState({});
   const [message, setMessage] = useState('');
 
-  const [language, setLanguage] = useState('नेपाली');
+  const [language, setLanguage] = useState(() => localStorage.getItem('load_language') || 'नेपाली');
   const [languageMenuOpen, setLanguageMenuOpen] = useState(false);
   const [mainMenuOpen, setMainMenuOpen] = useState(false);
   const [welcomeAction, setWelcomeAction] = useState('');
   const [navHistory, setNavHistory] = useState([]);
   const [role, setRole] = useState('');
   const [roleCategory, setRoleCategory] = useState('');
+  const [roleType, setRoleType] = useState(() => localStorage.getItem('load_role_type') || '');
   const [authStep, setAuthStep] = useState('details');
   const [phone, setPhone] = useState('');
   const [email, setEmail] = useState('');
@@ -210,9 +221,12 @@ function App() {
   const [kycFrontFile, setKycFrontFile] = useState(null);
   const [kycPhotoFile, setKycPhotoFile] = useState(null);
   const [kycBackFile, setKycBackFile] = useState(null);
+  const [kycExtraDocs, setKycExtraDocs] = useState({});
   const [notifications, setNotifications] = useState([]);
   const [notificationsError, setNotificationsError] = useState('');
   const [bookings, setBookings] = useState([]);
+  const [vehicleBookings, setVehicleBookings] = useState([]);
+  const [vehicleBookingsError, setVehicleBookingsError] = useState('');
   const [selectedBooking, setSelectedBooking] = useState(null);
   const [chatMessages, setChatMessages] = useState([]);
   const [chatDraft, setChatDraft] = useState('');
@@ -250,7 +264,90 @@ function App() {
   const [accountKycStatus, setAccountKycStatus] = useState('लोड हुँदैछ...');
   const [accountKycNote, setAccountKycNote] = useState('');
   const [isAppAdmin, setIsAppAdmin] = useState(false);
+  const [isRootAdmin, setIsRootAdmin] = useState(false);
+  const [kycCheckComplete, setKycCheckComplete] = useState(false);
+
+  useEffect(() => {
+    if (authStep !== 'complete') {
+      setKycCheckComplete(false);
+      return;
+    }
+    if (!role || page === 'admin-application' || page.startsWith('settings-admin')) return;
+    setKycCheckComplete(false);
+    let active = true;
+    (async () => {
+      try {
+        const { data: auth } = await supabase.auth.getUser();
+        if (!auth?.user) return;
+        const { data: admin, error: adminError } = await supabase.rpc('is_app_admin');
+      const { data: rootAdmin, error: rootError } = await supabase.rpc('is_root_admin');
+      if (!active) return;
+      const isRoot = auth.user.id === '0cff7068-0096-4032-8983-a70839aa064e' || (!rootError && rootAdmin === true);
+      const hasAdminAccess = (!adminError && admin === true) || isRoot;
+      if (hasAdminAccess) {
+        setIsAppAdmin(true);
+        setIsRootAdmin(isRoot);
+        setKycCheckComplete(true);
+        return;
+      }
+      setIsAppAdmin(false);
+      setIsRootAdmin(false);
+
+      const { data: approvedRows, error: approvedError } = await supabase
+          .from('kyc_records')
+          .select('status, admin_note, created_at')
+          .eq('user_id', auth.user.id)
+          .eq('status', 'approved')
+          .order('created_at', { ascending: false })
+          .limit(1);
+        if (approvedError) throw approvedError;
+        if (!active) return;
+        if (approvedRows?.length) {
+          setAccountKycStatus('स्वीकृत (Approved)');
+          setAccountKycNote(approvedRows[0].admin_note || '');
+          setKycCheckComplete(true);
+          if (page === 'kyc' || page === 'kyc-pending') setPage('home');
+          return;
+        }
+
+        const { data, error } = await supabase.from('kyc_records')
+          .select('status, admin_note, created_at')
+          .eq('user_id', auth.user.id)
+          .order('created_at', { ascending: false }).limit(1);
+        if (error) throw error;
+        if (!active) return;
+
+        const k = data?.[0];
+        const status = k?.status || '';
+        setAccountKycStatus(!k ? 'कागजात पेश गरिएको छैन' :
+          ({pending:'प्रतीक्षामा (Pending)', approved:'स्वीकृत (Approved)', rejected:'अस्वीकृत (Rejected)'}[status] || status || 'अज्ञात'));
+        setAccountKycNote(k?.admin_note || '');
+
+        if (!k) {
+        if (page !== 'kyc') setPage('kyc');
+      } else if (status === 'pending') {
+        if (page !== 'kyc-pending') setPage('kyc-pending');
+      } else if (status === 'rejected') {
+        if (page !== 'kyc') setPage('kyc');
+      } else if (status === 'approved') {
+        if (page === 'kyc' || page === 'kyc-pending') setPage('home');
+      } else {
+        if (page !== 'kyc-pending') setPage('kyc-pending');
+      }
+      setKycCheckComplete(true);
+      } catch (err) {
+        if (active) {
+          setMessage('KYC स्थिति जाँच्न सकिएन: ' + (err.message || 'त्रुटि'));
+          setPage('kyc-pending');
+          setKycCheckComplete(true);
+        }
+      }
+    })();
+    return () => { active = false; };
+  }, [authStep, role, page]);
+
   const [adminKyc, setAdminKyc] = useState([]);
+  const [adminKycDocuments, setAdminKycDocuments] = useState([]);
   const [adminApplications, setAdminApplications] = useState([]);
   const [adminApplicationsMessage, setAdminApplicationsMessage] = useState('');
   const [adminStats, setAdminStats] = useState(null);
@@ -279,9 +376,45 @@ function App() {
   const [profileStatus, setProfileStatus] = useState('active');
   const [profilePhotoFile, setProfilePhotoFile] = useState(null);
   const [profilePhotoUrl, setProfilePhotoUrl] = useState('');
+  const [providerVehicle, setProviderVehicle] = useState({});
+
 
   useEffect(() => {
-    if (page !== 'profile') return;
+    if (page !== 'loads' && page !== 'truck') return;
+    let active = true;
+    (async () => {
+      try {
+        const { data: auth } = await supabase.auth.getUser();
+        if (!auth?.user) return;
+        const { data: profile } = await supabase.from('load_profiles')
+          .select('display_name,phone').eq('user_id', auth.user.id).maybeSingle();
+        const { data: kyc } = await supabase.from('kyc_records')
+          .select('id').eq('user_id', auth.user.id).eq('status', 'approved')
+          .order('created_at', { ascending: false }).limit(1).maybeSingle();
+        let v = {};
+        if (kyc?.id) {
+          const { data: docs } = await supabase.from('kyc_documents')
+            .select('document_kind,details').eq('kyc_record_id', kyc.id);
+          const d = (docs || []).find(x => x.document_kind === 'vehicle_bluebook');
+          v = d?.details || {};
+        }
+        if (active) setProviderVehicle({
+          name: profile?.display_name || '',
+          phone: profile?.phone || '',
+          number: v.vehicle_number || '',
+          type: v.vehicle_type || '',
+          capacity: v.load_capacity || '',
+          unit: v.capacity_unit || 'ton'
+        });
+      } catch (e) {
+        if (active) setMessage('KYC विवरण लोड भएन: ' + e.message);
+      }
+    })();
+    return () => { active = false; };
+  }, [page, role, authStep]);
+
+  useEffect(() => {
+    if (page !== 'profile' && page !== 'settings-account') return;
     let active = true;
     (async () => {
       try {
@@ -293,10 +426,28 @@ function App() {
           .eq('user_id', auth.user.id)
           .maybeSingle();
         if (error) throw error;
+
+        const { data: kycRows, error: kycError } = await supabase
+          .from('kyc_records')
+          .select('full_name, phone, address, address_province, address_district, address_local_level, address_ward, address_tole, status, created_at')
+          .eq('user_id', auth.user.id)
+          .order('created_at', { ascending: false })
+          .limit(1);
+        if (kycError) throw kycError;
         if (!active) return;
-        setProfileName(data?.display_name || '');
-        setProfilePhone(data?.phone || '');
-        setProfileAddress('');
+
+        const kyc = kycRows?.[0];
+        const kycAddress = kyc?.address || [
+          kyc?.address_province,
+          kyc?.address_district,
+          kyc?.address_local_level,
+          kyc?.address_ward ? 'वडा ' + kyc.address_ward : '',
+          kyc?.address_tole
+        ].filter(Boolean).join(', ');
+
+        setProfileName(data?.display_name || kyc?.full_name || '');
+        setProfilePhone(data?.phone || kyc?.phone || '');
+        setProfileAddress(kycAddress);
         setProfileEmail(auth.user.email || data?.email || '');
         setProfileStatus(data?.account_status || 'active');
         if (data?.photo_path) {
@@ -330,11 +481,12 @@ function App() {
       const uid = auth.user.id;
       const [loadsResult, bookingsResult] = await Promise.all([
         supabase.from('loads')
-          .select('id,origin,destination,cargo,weight,proposed_price,status,created_at')
+          .select('id,origin,destination,cargo,weight,proposed_price,status,created_at,expires_at')
           .eq('owner_id', uid).order('created_at', { ascending: false }),
         supabase.from('load_bookings')
           .select('id,load_id,customer_id,driver_id,status,created_at,updated_at,completed_at,actual_distance_km,actual_fare')
           .or(`customer_id.eq.${uid},driver_id.eq.${uid}`)
+          .in('status', ['completed', 'cancelled'])
           .order('created_at', { ascending: false })
       ]);
       if (!active) return;
@@ -355,6 +507,12 @@ function App() {
       if (session) {
         const savedRole = localStorage.getItem('load_role');
         if (savedRole) setRole(savedRole);
+        if (session.user?.id === '0cff7068-0096-4032-8983-a70839aa064e') {
+          setIsAppAdmin(true);
+          setIsRootAdmin(true);
+          setKycCheckComplete(true);
+          setAccountKycStatus('स्वीकृत (Approved)');
+        }
         setAuthStep('complete');
       }
     };
@@ -366,7 +524,8 @@ function App() {
         const callbackUrl = new URL(url);
         const code = callbackUrl.searchParams.get('code');
         if (!code) {
-          setAuthMessage('Google Login पूरा भएन। फेरि प्रयास गर्नुहोस्।');
+          const oauthError = callbackUrl.searchParams.get('error_description') || callbackUrl.searchParams.get('error') || 'Google बाट authorization code आएन';
+          setAuthMessage('Google Login समस्या: ' + oauthError);
           return;
         }
         const { error } = await supabase.auth.exchangeCodeForSession(code);
@@ -387,6 +546,12 @@ function App() {
         if (session) {
           const savedRole = localStorage.getItem('load_role');
           if (savedRole) setRole(savedRole);
+          if (session.user?.id === '0cff7068-0096-4032-8983-a70839aa064e') {
+            setIsAppAdmin(true);
+            setIsRootAdmin(true);
+            setKycCheckComplete(true);
+            setAccountKycStatus('स्वीकृत (Approved)');
+          }
           setAuthStep('complete');
         }
       }
@@ -441,8 +606,8 @@ function App() {
       'तपाईंको ढुवानी, अब सजिलो!':'Your transport, made easy!',
       'लोड खोज्नुहोस्। गाडी जोड्नुहोस्। कागजात व्यवस्थित राख्नुहोस्।':'Find loads. Connect vehicles. Manage documents.',
       'तपाईंलाई के चाहिएको छ?':'What do you need?',
-      'लोड पोस्ट गर्नुहोस्':'Post a Load','नयाँ सामान ढुवानीको विवरण':'New shipment details',
-      'लोड खोज्नुहोस्':'Find Loads','उपलब्ध ढुवानीका कामहरू':'Available shipments',
+      'ढुवानीका लागि गाडी खोज्नुहोस्':'Find a Vehicle for Goods','नयाँ सामान ढुवानीको विवरण':'New shipment details',
+      'गाडीका लागि लोड खोज्नुहोस्':'Find Loads for a Vehicle','उपलब्ध ढुवानीका कामहरू':'Available shipments',
       'गाडी दर्ता गर्नुहोस्':'Register Vehicle','गाडी र क्षमता विवरण':'Vehicle and capacity details',
       'ड्राइभरको लाइसेन्स':'Driver Licence','लाइसेन्स विवरण र फोटो':'Licence details and photo',
       'गाडीको ब्लुबुक':'Vehicle Registration','गाडी दर्ता कागजात':'Vehicle registration document',
@@ -475,14 +640,25 @@ function App() {
       'ढुवानीको सजिलो साथी':'Your transport partner',
       'विवरण यस एपमा सुरक्षित भयो।':'Details saved in this app.',
       'अहिलेसम्म लोड पोस्ट गरिएको छैन। सुरु गर्न तलको बटन थिच्नुहोस्.':'No loads posted yet. Tap below to start.',
-      'लोड पोस्ट गरिएको छैन।':'No loads posted yet.'
-    },
+      'लोड पोस्ट गरिएको छैन।':'No loads posted yet.',
+    
+      'मेरा बुकिङ': 'My Bookings',
+      'बुकिङ सूची': 'Booking List',
+      'Account': 'Account',
+      'Privacy': 'Privacy',
+      'Lists': 'Lists',
+      'Storage and Data': 'Storage and Data',
+      'App Language': 'App Language',
+      'Help': 'Help',
+      'City': 'City',
+      'Request History': 'Request History',
+      'Logout': 'Logout',},
     'हिन्दी': {
       'तपाईंको ढुवानी, अब सजिलो!':'आपकी ढुलाई, अब आसान!',
       'लोड खोज्नुहोस्। गाडी जोड्नुहोस्। कागजात व्यवस्थित राख्नुहोस्।':'लोड खोजें। वाहन जोड़ें। दस्तावेज़ व्यवस्थित रखें।',
       'तपाईंलाई के चाहिएको छ?':'आपको क्या चाहिए?',
-      'लोड पोस्ट गर्नुहोस्':'लोड पोस्ट करें','नयाँ सामान ढुवानीको विवरण':'नई खेप का विवरण',
-      'लोड खोज्नुहोस्':'लोड खोजें','उपलब्ध ढुवानीका कामहरू':'उपलब्ध ढुलाई के काम',
+      'ढुवानीका लागि गाडी खोज्नुहोस्':'लोड पोस्ट करें','नयाँ सामान ढुवानीको विवरण':'नई खेप का विवरण',
+      'गाडीका लागि लोड खोज्नुहोस्':'लोड खोजें','उपलब्ध ढुवानीका कामहरू':'उपलब्ध ढुलाई के काम',
       'गाडी दर्ता गर्नुहोस्':'वाहन पंजीकृत करें','गाडी र क्षमता विवरण':'वाहन और क्षमता विवरण',
       'ड्राइभरको लाइसेन्स':'ड्राइवर लाइसेंस','लाइसेन्स विवरण र फोटो':'लाइसेंस विवरण और फोटो',
       'गाडीको ब्लुबुक':'वाहन पंजीकरण','गाडी दर्ता कागजात':'वाहन पंजीकरण दस्तावेज़',
@@ -511,14 +687,25 @@ function App() {
       'नयाँ लोड पोस्ट':'नया लोड पोस्ट करें','गाडीको विवरण सुरक्षित गर्नुहोस्':'वाहन विवरण सेव करें',
       'विवरण सुरक्षित गर्नुहोस्':'विवरण सेव करें','कम्पनीको विवरण सुरक्षित गर्नुहोस्':'कंपनी विवरण सेव करें',
       'चलानी सुरक्षित गर्नुहोस्':'बिल सेव करें','← मुख्य पृष्ठमा फर्कनुहोस्':'← मुख्य पृष्ठ पर जाएँ',
-      'ढुवानीको सजिलो साथी':'आपका ढुलाई साथी','विवरण यस एपमा सुरक्षित भयो।':'विवरण इस ऐप में सेव हुआ।'
-    },
+      'ढुवानीको सजिलो साथी':'आपका ढुलाई साथी','विवरण यस एपमा सुरक्षित भयो।':'विवरण इस ऐप में सेव हुआ।',
+    
+      'मेरा बुकिङ': 'मेरी बुकिंग',
+      'बुकिङ सूची': 'बुकिंग सूची',
+      'Account': 'खाता',
+      'Privacy': 'गोपनीयता',
+      'Lists': 'सूचियाँ',
+      'Storage and Data': 'स्टोरेज और डेटा',
+      'App Language': 'ऐप की भाषा',
+      'Help': 'मदद',
+      'City': 'शहर',
+      'Request History': 'अनुरोध इतिहास',
+      'Logout': 'लॉग आउट',},
     '中文': {
       'तपाईंको ढुवानी, अब सजिलो!':'让货运更简单！',
       'लोड खोज्नुहोस्। गाडी जोड्नुहोस्। कागजात व्यवस्थित राख्नुहोस्।':'寻找货源、连接车辆、管理文件。',
       'तपाईंलाई के चाहिएको छ?':'您需要什么？',
-      'लोड पोस्ट गर्नुहोस्':'发布货源','नयाँ सामान ढुवानीको विवरण':'新货运信息',
-      'लोड खोज्नुहोस्':'寻找货源','उपलब्ध ढुवानीका कामहरू':'可用运输任务',
+      'ढुवानीका लागि गाडी खोज्नुहोस्':'发布货源','नयाँ सामान ढुवानीको विवरण':'新货运信息',
+      'गाडीका लागि लोड खोज्नुहोस्':'寻找货源','उपलब्ध ढुवानीका कामहरू':'可用运输任务',
       'गाडी दर्ता गर्नुहोस्':'登记车辆','गाडी र क्षमता विवरण':'车辆及载重信息',
       'ड्राइभरको लाइसेन्स':'司机驾照','लाइसेन्स विवरण र फोटो':'驾照信息和照片',
       'गाडीको ब्लुबुक':'车辆登记证','गाडी दर्ता कागजात':'车辆登记文件',
@@ -547,8 +734,19 @@ function App() {
       'नयाँ लोड पोस्ट':'发布新货源','गाडीको विवरण सुरक्षित गर्नुहोस्':'保存车辆信息',
       'विवरण सुरक्षित गर्नुहोस्':'保存信息','कम्पनीको विवरण सुरक्षित गर्नुहोस्':'保存公司信息',
       'चलानी सुरक्षित गर्नुहोस्':'保存运输单据','← मुख्य पृष्ठमा फर्कनुहोस्':'← 返回首页',
-      'ढुवानीको सजिलो साथी':'您的运输伙伴','विवरण यस एपमा सुरक्षित भयो।':'信息已保存在此应用中。'
-    }
+      'ढुवानीको सजिलो साथी':'您的运输伙伴','विवरण यस एपमा सुरक्षित भयो。':'信息已保存在此应用中。',
+    
+      'मेरा बुकिङ': '我的预订',
+      'बुकिङ सूची': '预订列表',
+      'Account': '账户',
+      'Privacy': '隐私',
+      'Lists': '列表',
+      'Storage and Data': '存储与数据',
+      'App Language': '应用语言',
+      'Help': '帮助',
+      'City': '城市',
+      'Request History': '请求记录',
+      'Logout': '退出登录',}
   };
   const featureTranslations = {
       'English': {
@@ -630,6 +828,11 @@ function App() {
 
 
   const go = (p) => {
+    if (authStep === 'complete' && role && !isAppAdmin && kycCheckComplete && accountKycStatus !== 'स्वीकृत (Approved)' && !['kyc', 'kyc-pending'].includes(p)) {
+      setPage(accountKycStatus === 'प्रतीक्षामा (Pending)' ? 'kyc-pending' : 'kyc');
+      setMessage('पहिले KYC प्रमाणिकरण पूरा गर्नुहोस्।');
+      return;
+    }
     if (p !== page) setNavHistory(prev => [...prev, page]);
     setPage(p);
     setForm({});
@@ -637,6 +840,14 @@ function App() {
   };
 
   const goBack = () => {
+    if (page === 'kyc' || page === 'kyc-pending') {
+      localStorage.removeItem('load_role');
+      setRole('');
+      setNavHistory([]);
+      setPage('home');
+      setMessage('');
+      return;
+    }
     if (navHistory.length > 0) {
       setPage(navHistory[navHistory.length - 1]);
       setNavHistory(prev => prev.slice(0, -1));
@@ -719,6 +930,29 @@ function App() {
   }, [page]);
 
   useEffect(() => {
+    if (!['bookings', 'settings-history'].includes(page)) return;
+    let active = true;
+    (async () => {
+      setVehicleBookingsError('');
+      const { data: auth, error: authError } = await supabase.auth.getUser();
+      if (authError || !auth?.user) {
+        if (active) setVehicleBookingsError('म्याप बुकिङ हेर्न पहिले लगइन गर्नुहोस्।');
+        return;
+      }
+      const uid = auth.user.id;
+      const { data, error } = await supabase.from('vehicle_booking_requests')
+        .select('*')
+        .or(`requester_id.eq.${uid},vehicle_owner_id.eq.${uid}`)
+        .order('created_at', { ascending: false })
+        .limit(100);
+      if (!active) return;
+      if (error) setVehicleBookingsError('म्याप बुकिङ लोड भएन: ' + error.message);
+      else setVehicleBookings(data || []);
+    })();
+    return () => { active = false; };
+  }, [page]);
+
+  useEffect(() => {
     if (page !== 'chat' || !selectedBooking) return;
     let active = true;
     (async () => {
@@ -776,12 +1010,15 @@ function App() {
       if (!auth?.user) return;
       const { data: admin, error: adminError } = await supabase.rpc('is_app_admin');
       if (!active) return;
-      if (adminError || admin !== true) {
+      if ((adminError || admin !== true) && auth.user.id !== '0cff7068-0096-4032-8983-a70839aa064e') {
         setIsAppAdmin(false);
         return;
       }
       setIsAppAdmin(true);
-  const { data: paymentRows, error: paymentError } = await supabase
+  const { data: rootAdmin, error: rootAdminError } = await supabase.rpc('is_root_admin');
+      if (!active) return;
+      setIsRootAdmin(!rootAdminError && rootAdmin === true);
+      const { data: paymentRows, error: paymentError } = await supabase
     .from('payments')
     .select('id,booking_id,payer_id,payee_id,amount,currency,method,status,transaction_reference,created_at')
     .order('created_at', { ascending: false }).limit(300);
@@ -838,7 +1075,7 @@ function App() {
     if (statsError) setAdminKycMessage('तथ्याङ्क लोड भएन: ' + statsError.message);
     else setAdminStats(stats);
       const { data, error } = await supabase.from('kyc_records')
-        .select('id,user_id,role_category,role_type,full_name,phone,document_type,document_number,document_path,document_back_path,status,admin_note,created_at')
+        .select('id,user_id,role_category,role_type,role_details,full_name,phone,document_type,document_number,photo_path,document_path,document_back_path,status,admin_note,created_at')
         .order('created_at', { ascending: false });
       if (!active) return;
       if (error) {
@@ -846,19 +1083,41 @@ function App() {
       } else {
         const bucket = supabase.storage.from('kyc-private');
         const rows = await Promise.all((data || []).map(async k => {
-          const [front, back] = await Promise.all([
-            k.document_path ? bucket.createSignedUrl(k.document_path, 60) : Promise.resolve({data:null,error:null}),
-            k.document_back_path ? bucket.createSignedUrl(k.document_back_path, 60) : Promise.resolve({data:null,error:null})
+          const [photo, front, back] = await Promise.all([
+            k.photo_path ? bucket.createSignedUrl(k.photo_path, 3600) : Promise.resolve({data:null,error:null}),
+            k.document_path ? bucket.createSignedUrl(k.document_path, 3600) : Promise.resolve({data:null,error:null}),
+            k.document_back_path ? bucket.createSignedUrl(k.document_back_path, 3600) : Promise.resolve({data:null,error:null})
           ]);
           return {
             ...k,
+            photoUrl: photo.data?.signedUrl || '',
             frontUrl: front.data?.signedUrl || '',
             backUrl: back.data?.signedUrl || '',
-            fileError: front.error?.message || back.error?.message || ''
+            fileError: photo.error?.message || front.error?.message || back.error?.message || ''
           };
         }));
         if (!active) return;
         setAdminKyc(rows);
+      }
+    
+      const { data: kycDocs, error: kycDocsError } = await supabase
+        .from('kyc_documents')
+        .select('id,user_id,document_kind,document_side,storage_path,kyc_record_id,document_number,expiry_date,details,status,admin_note,created_at')
+        .order('created_at', { ascending: false })
+        .limit(500);
+      if (!active) return;
+      if (kycDocsError) {
+        setAdminKycMessage(old => old ? old + ' | अतिरिक्त KYC कागजात: ' + kycDocsError.message : 'अतिरिक्त KYC कागजात लोड भएन: ' + kycDocsError.message);
+      } else {
+        const docsBucket = supabase.storage.from('kyc-private');
+        const docsWithUrls = await Promise.all((kycDocs || []).map(async d => {
+          const file = d.storage_path
+            ? await docsBucket.createSignedUrl(d.storage_path, 60)
+            : { data: null, error: null };
+          return { ...d, fileUrl: file.data?.signedUrl || '', fileError: file.error?.message || '' };
+        }));
+        if (!active) return;
+        setAdminKycDocuments(docsWithUrls);
       }
     })();
     return () => { active = false; };
@@ -867,14 +1126,31 @@ function App() {
   const decideKyc = async (id, status) => {
     setAdminKycMessage('');
     const note = status === 'approved' ? 'Admin बाट स्वीकृत' : 'कागजात पुनः जाँच गरी पेश गर्नुहोस्';
-    const { error } = await supabase.from('kyc_records')
-      .update({ status, admin_note: note }).eq('id', id);
-    if (error) {
-      setAdminKycMessage('अपडेट भएन: ' + error.message);
+    const { data: record, error: recordError } = await supabase
+      .from('kyc_records')
+      .update({ status, admin_note: note })
+      .eq('id', id)
+      .select('id,user_id')
+      .single();
+    if (recordError) {
+      setAdminKycMessage('KYC स्थिति अपडेट भएन: ' + recordError.message);
       return;
     }
+
+    const { error: docsError } = await supabase
+      .from('kyc_documents')
+      .update({ status, admin_note: note, updated_at: new Date().toISOString() })
+      .eq('kyc_record_id', id);
+
+    if (docsError) {
+      setAdminKyc(old => old.map(k => k.id === id ? { ...k, status, admin_note: note } : k));
+      setAdminKycMessage('मुख्य KYC अपडेट भयो, तर अतिरिक्त कागजात अपडेट भएन: ' + docsError.message);
+      return;
+    }
+
     setAdminKyc(old => old.map(k => k.id === id ? { ...k, status, admin_note: note } : k));
-    setAdminKycMessage('KYC स्थिति अपडेट भयो।');
+    setAdminKycDocuments(old => old.map(d => d.kyc_record_id === id ? { ...d, status, admin_note: note, updated_at: new Date().toISOString() } : d));
+    setAdminKycMessage('KYC र त्यससँग जोडिएका अतिरिक्त कागजातको स्थिति अपडेट भयो।');
   };
 
   if (showResetPassword && page !== 'admin-application') return (
@@ -896,6 +1172,13 @@ function App() {
     </div>
   );
 
+  if (authStep === 'complete' && role && !isAppAdmin &&
+      !kycCheckComplete && page !== 'admin-application' && !page.startsWith('settings-admin')) return (
+    <div style={{minHeight:'100vh',display:'grid',placeItems:'center',padding:24,textAlign:'center'}}>
+      <div><div style={{fontSize:42}}>🔐</div><h3>KYC स्थिति जाँच हुँदैछ</h3><p>कृपया केही समय प्रतीक्षा गर्नुहोस्।</p></div>
+    </div>
+  );
+
   if (page !== 'admin-application' && !role && !welcomeAction && authStep !== 'complete') return (
     <div style={{minHeight:'100vh',boxSizing:'border-box',background:'linear-gradient(155deg,#0B192C,#173e5e)',color:'white',padding:'24px 22px',fontFamily:'Arial,sans-serif',maxWidth:600,margin:'auto',display:'flex',flexDirection:'column'}}>
       <div style={{display:'flex',justifyContent:'space-between',alignItems:'center'}}>
@@ -909,7 +1192,7 @@ function App() {
         <div style={{position:'relative'}}>
           <button type="button" aria-label="भाषा छान्नुहोस्" onClick={() => setLanguageMenuOpen(!languageMenuOpen)} style={{fontSize:25,padding:'7px 10px',border:'1px solid #ffffff55',borderRadius:12,background:'transparent',color:'white'}}>🌐</button>
           {languageMenuOpen && <div style={{position:'absolute',right:0,top:'110%',zIndex:20,minWidth:145,background:'white',color:'#102b46',borderRadius:12,boxShadow:'0 4px 16px #0003',padding:6}}>
-            {['नेपाली','English','हिन्दी','中文'].map(name => <button key={name} type="button" onClick={() => {setLanguage(name);setLanguageMenuOpen(false);}} style={{display:'block',width:'100%',textAlign:'left',padding:10,border:0,borderRadius:8,background:language===name?'#e8f0f8':'white',color:'#102b46',fontSize:14}}>{name}</button>)}
+            {['नेपाली','English','हिन्दी','中文'].map(name => <button key={name} type="button" onClick={() => {setLanguage(name);localStorage.setItem('load_language', name);setLanguageMenuOpen(false);}} style={{display:'block',width:'100%',textAlign:'left',padding:10,border:0,borderRadius:8,background:language===name?'#e8f0f8':'white',color:'#102b46',fontSize:14}}>{name}</button>)}
           </div>}
         </div>
       </div>
@@ -923,7 +1206,7 @@ function App() {
         <div style={{display:'flex',alignItems:'center',gap:12,margin:'0 0 14px',color:'#dce7f2',fontSize:12}}>
           <div style={{height:1,background:'#ffffff45',flex:1}}></div><span>वा Google प्रयोग गर्नुहोस्</span><div style={{height:1,background:'#ffffff45',flex:1}}></div>
         </div>
-        <button type="button" onClick={async () => {const {data,error}=await supabase.auth.signInWithOAuth({provider:'google',options:{redirectTo:'com.load.logistics://login-callback',skipBrowserRedirect:true}});if(error)setAuthMessage('Google Login समस्या: '+error.message);else if(data?.url)await Browser.open({url:data.url});}} style={{width:'100%',padding:15,border:'1px solid #ffffff60',borderRadius:12,background:'#fff',color:'#102b46',fontSize:16,fontWeight:700}}>Google बाट लगइन गर्नुहोस्</button>
+        <button type="button" onClick={async () => {const {data,error}=await supabase.auth.signInWithOAuth({provider:'google',options:{redirectTo:Capacitor.isNativePlatform()?'com.load.logistics://login-callback':window.location.origin,skipBrowserRedirect:Capacitor.isNativePlatform()}});if(error)setAuthMessage('Google Login समस्या: '+error.message);else if(data?.url)await Browser.open({url:data.url});}} style={{width:'100%',padding:15,border:'1px solid #ffffff60',borderRadius:12,background:'#fff',color:'#102b46',fontSize:16,fontWeight:700}}>Google बाट लगइन गर्नुहोस्</button>
         {authMessage && <p style={{color:'#ffd6a8',fontSize:13,textAlign:'center'}}>{authMessage}</p>}
       </div>
     </div>
@@ -962,7 +1245,7 @@ function App() {
               ['नेपाली','🇳🇵'],['English','🇬🇧'],
               ['हिन्दी','🇮🇳'],['中文','🇨🇳']
             ].map(([name,flag]) => <button key={name} type="button"
-              onClick={() => {setLanguage(name);setLanguageMenuOpen(false);}}
+              onClick={() => {setLanguage(name);localStorage.setItem('load_language', name);setLanguageMenuOpen(false);}}
               style={{display:'block',width:'100%',textAlign:'left',
                 padding:'9px 8px',border:0,borderRadius:8,
                 background:language===name?'#e8f0f8':'white',
@@ -988,31 +1271,34 @@ function App() {
         }[language] || ''}
       </p>
       {roleGroups[language].map(group => (
-        <div key={group.key} style={{margin:'12px 0'}}>
-          <button type="button" onClick={() => setRoleCategory(roleCategory === group.key ? '' : group.key)}
+          <button type="button" key={group.key}
+            onClick={() => {
+              const initialRole = group.key === 'seeker' ? 'customer' : 'driver';
+              localStorage.setItem('load_role_category', group.key);
+              localStorage.removeItem('load_role_type');
+              setRoleType('');
+              localStorage.setItem('load_role', initialRole);
+              setRoleCategory(group.key);
+              setRole(initialRole);
+              if (isRootAdmin) {
+                setIsAppAdmin(true);
+                setKycCheckComplete(true);
+                setAccountKycStatus('स्वीकृत (Approved)');
+                go('home');
+              } else {
+                go('kyc');
+              }
+            }}
             style={{display:'block',width:'100%',textAlign:'left',padding:16,
-              border:roleCategory===group.key?'2px solid #FF6500':'1px solid #ffffff45',
-              borderRadius:14,background:'#fff',color:'#102b46',fontSize:16,fontWeight:700}}>
+              margin:'12px 0',border:'1px solid #ffffff45',borderRadius:14,
+              background:'#fff',color:'#102b46',fontSize:16,fontWeight:700}}>
             {group.name}
-            <div style={{fontSize:12,fontWeight:400,color:'#64748b',marginTop:6,lineHeight:1.5}}>{group.desc}</div>
+            <div style={{fontSize:12,fontWeight:400,color:'#64748b',marginTop:6,lineHeight:1.5}}>
+              {group.desc}
+            </div>
           </button>
-          {roleCategory === group.key && <div style={{padding:'8px 0 0 12px'}}>
-            {group.options.map(([key,name],i) => (
-              <button type="button" key={group.key+'-'+i} onClick={() => {
-                localStorage.setItem('load_role_category', group.key);
-                localStorage.setItem('load_role_type', name);
-                localStorage.setItem('load_role', key);
-                setRole(key);
-              }} style={{display:'block',width:'100%',textAlign:'left',padding:13,margin:'7px 0',
-                border:'1px solid #ffffff55',borderRadius:10,background:'#eaf1f8',
-                color:'#102b46',fontSize:14,fontWeight:600}}>
-                {name} →
-              </button>
-            ))}
-          </div>}
-        </div>
-      ))}
-      <p style={{fontSize:12,color:'#c5d5e5',marginTop:22}}>
+        ))}
+        <p style={{fontSize:12,color:'#c5d5e5',marginTop:22}}>
         भूमिका छानेपछि खाता प्रमाणीकरण र सेवा सेटअप थप्नेछौँ।
       </p>
     </div>
@@ -1044,7 +1330,7 @@ function App() {
             localStorage.setItem('load_role', role);
             const { data, error } = await supabase.auth.signInWithOAuth({
               provider: 'google',
-              options: { redirectTo: 'com.load.logistics://login-callback', skipBrowserRedirect: true }
+              options: { redirectTo: Capacitor.isNativePlatform() ? 'com.load.logistics://login-callback' : window.location.origin, skipBrowserRedirect: Capacitor.isNativePlatform() }
             });
             if (error) setAuthMessage('Google Login समस्या: ' + error.message);
             else if (data?.url) await Browser.open({ url: data.url });
@@ -1135,6 +1421,7 @@ function App() {
     try {
       const { data: auth, error: authError } = await supabase.auth.getUser();
       if (authError || !auth.user) throw new Error("पहिले लगइन गर्नुहोस्।");
+      await requireApprovedKyc(auth.user.id);
 
       if (auth.user.id === booking.customer_id) {
         const { data, error } = await supabase.functions.invoke("delivery-otp", {
@@ -1236,9 +1523,50 @@ function App() {
       });
       if (error) throw error;
       setLoads(prev => prev.filter(item => item.id !== load.id));
+      setHistoryLoads(prev => prev.map(item => item.id === load.id ? { ...item, status: 'cancelled' } : item));
       setMessage(data || "लोड पोस्ट रद्द भयो।");
     } catch (err) {
       setMessage("लोड पोस्ट रद्द भएन: " + (err.message || "फेरि प्रयास गर्नुहोस्।"));
+    }
+  };
+
+  const repostExpiredLoad = async (load) => {
+    try {
+      const { data: auth, error: authError } = await supabase.auth.getUser();
+      if (authError || !auth.user) throw new Error("पहिले लगइन गर्नुहोस्।");
+      if (load.status !== 'open' || !load.expires_at || new Date(load.expires_at).getTime() > Date.now()) {
+        throw new Error("यो पोस्टको म्याद अझै सकिएको छैन।");
+      }
+
+      const newExpiry = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+      const { data, error } = await supabase.from('loads').update({
+        status: 'open',
+        expires_at: newExpiry
+      }).eq('id', load.id).eq('owner_id', auth.user.id)
+        .select('id,owner_id,origin,destination,cargo,weight,proposed_price,status,created_at,expires_at')
+        .single();
+
+      if (error) throw error;
+      setHistoryLoads(prev => prev.map(item => item.id === load.id ? data : item));
+      setLoads(prev => [data, ...prev.filter(item => item.id !== load.id)]);
+      setMessage("पुरानै पोस्ट फेरि खुल्यो। म्याद अहिलेबाट १ घण्टा थपियो।");
+    } catch (err) {
+      setMessage("पोस्टको म्याद थप्न सकिएन: " + (err.message || "फेरि प्रयास गर्नुहोस्।"));
+    }
+  };
+
+  const requireApprovedKyc = async (userId) => {
+    const { data: rows, error } = await supabase
+      .from('kyc_records')
+      .select('status, created_at')
+      .eq('user_id', userId)
+      .order('created_at', { ascending: false })
+      .limit(1);
+    if (error) throw error;
+    const kyc = rows?.[0];
+    if (!kyc) throw new Error('पहिले KYC भर्नुहोस्।');
+    if (kyc.status !== 'approved') {
+      throw new Error('Admin ले KYC स्वीकृत नगरेसम्म सुविधा चल्दैन।');
     }
   };
 
@@ -1247,6 +1575,7 @@ function App() {
       const { data, error: authError } = await supabase.auth.getUser();
       const user = data?.user;
       if (authError || !user) throw new Error("पहिले लगइन गर्नुहोस्।");
+      await requireApprovedKyc(user.id);
       if (!load.owner_id) throw new Error("लोड पोस्ट गर्ने व्यक्तिको ID भेटिएन।");
       if (load.owner_id === user.id) throw new Error("आफ्नै लोड बुक गर्न मिल्दैन।");
       const { data: booking, error } = await supabase.from("load_bookings").insert({
@@ -1306,26 +1635,77 @@ function App() {
 
   const save = async (e) => {
     e.preventDefault();
-    if (page !== 'post') {
-      setMessage('विवरण प्राप्त भयो।');
-      return;
-    }
+    setMessage('');
     try {
       const { data: auth, error: authError } = await supabase.auth.getUser();
       if (authError || !auth.user) {
         setMessage('पहिले इमेल OTP बाट लगइन गर्नुहोस्।');
         return;
       }
-      const { data: kyc, error: kycError } = await supabase
-        .from('kyc_records')
-        .select('status')
-        .eq('user_id', auth.user.id)
-        .maybeSingle();
-      if (kycError) throw kycError;
-      if (!kyc || kyc.status !== 'approved') {
-        setMessage(!kyc ? 'पहिले KYC भर्नुहोस्।' : 'KYC स्वीकृतिको प्रतीक्षामा छ।');
+
+      if (page === 'loads' || page === 'truck') {
+        await requireApprovedKyc(auth.user.id);
+
+        if (!providerVehicle.number || !providerVehicle.type) {
+          setMessage('गाडीको प्रकार र नम्बर भएको स्वीकृत KYC आवश्यक छ।');
+          return;
+        }
+        if (!form.provider_origin?.trim() || !form.provider_destination?.trim()) {
+          setMessage('गाडीको हालको स्थान र गन्तव्य भर्नुहोस्।');
+          return;
+        }
+
+        const scheduledTime = form.provider_available_at
+          ? new Date(form.provider_available_at).getTime()
+          : null;
+        if (scheduledTime !== null && !Number.isFinite(scheduledTime)) {
+          setMessage('उपलब्ध समय सही रूपमा छान्नुहोस्।');
+          return;
+        }
+
+        const expiryBase = scheduledTime && scheduledTime > Date.now()
+          ? scheduledTime
+          : Date.now();
+
+        const { error } = await supabase.from('vehicle_posts').insert({
+          owner_id: auth.user.id,
+          vehicle_type: providerVehicle.type,
+          vehicle_number: providerVehicle.number,
+          load_capacity: providerVehicle.capacity ? Number(providerVehicle.capacity) : null,
+          capacity_unit: providerVehicle.unit || 'ton',
+          contact_phone: (form.provider_phone ?? providerVehicle.phone ?? '').trim(),
+          origin: form.provider_origin.trim(),
+          origin_latitude: form.provider_origin_latitude ?? null,
+          origin_longitude: form.provider_origin_longitude ?? null,
+          destination: form.provider_destination.trim(),
+          available_at: form.provider_available_at
+            ? new Date(form.provider_available_at).toISOString()
+            : null,
+          proposed_price: form.provider_price ? Number(form.provider_price) : null,
+          expires_at: new Date(expiryBase + 60 * 60 * 1000).toISOString(),
+          status: 'open'
+        });
+        if (error) throw error;
+
+        setForm(prev => ({
+          ...prev,
+          provider_origin: '',
+          provider_origin_latitude: null,
+          provider_origin_longitude: null,
+          provider_destination: '',
+          provider_available_at: '',
+          provider_price: ''
+        }));
+        setMessage('गाडीको पोस्ट सुरक्षित भयो।');
         return;
       }
+
+      if (page !== 'post') {
+        setMessage('यो फारमबाट विवरण सुरक्षित गर्न मिल्दैन।');
+        return;
+      }
+
+      await requireApprovedKyc(auth.user.id);
       const { data, error } = await supabase.from('loads').insert({
         owner_id: auth.user.id,
         origin: form.origin,
@@ -1337,14 +1717,15 @@ function App() {
         origin_longitude: form.origin_longitude ?? null,
         destination_latitude: form.destination_latitude ?? null,
         destination_longitude: form.destination_longitude ?? null,
+        expires_at: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
         status: 'open'
       }).select().single();
       if (error) throw error;
-      setLoads(previous => [ { ...form, id: data.id }, ...previous ]);
+      setLoads(previous => [{ ...form, ...data, price: data.proposed_price }, ...previous]);
       setForm({});
       setMessage('लोड डेटाबेसमा सुरक्षित भयो।');
     } catch (error) {
-      setMessage('लोड सुरक्षित भएन: ' + (error.message || 'फेरि प्रयास गर्नुहोस्।'));
+      setMessage('पोस्ट सुरक्षित भएन: ' + (error.message || 'फेरि प्रयास गर्नुहोस्।'));
     }
   };
 
@@ -1356,7 +1737,22 @@ function App() {
         setMessage('पहिले इमेल OTP बाट लगइन गर्नुहोस्।');
         return;
       }
-      if (!form.full_name || !form.phone || !form.document_number || !kycPhotoFile || !kycFrontFile || !kycBackFile) {
+      const { data: previousKyc, error: previousKycError } = await supabase
+        .from('kyc_records')
+        .select('status, created_at')
+        .eq('user_id', auth.user.id)
+        .order('created_at', { ascending: false })
+        .limit(1);
+      if (previousKycError) throw previousKycError;
+      if (previousKyc?.[0]?.status === 'approved') {
+        setMessage('तपाईंको KYC पहिले नै स्वीकृत छ। फेरि भर्नुपर्दैन।');
+        return;
+      }
+      if (previousKyc?.[0]?.status === 'pending') {
+        setMessage('तपाईंको KYC Admin जाँचमा छ। निर्णय नआउँदासम्म पर्खनुहोस्।');
+        return;
+      }
+      if (!form.full_name || !form.phone || !form.address_province || !form.address_district || !form.address_local_level || !form.address_ward || !form.address_tole || !form.document_number || !kycPhotoFile || !kycFrontFile || !kycBackFile) {
         setMessage('सबै विवरण, पासपोर्ट साइजको फोटो र कागजातका दुवै फोटो भर्नुहोस्।');
         return;
       }
@@ -1375,27 +1771,150 @@ function App() {
         throw backUpload.error;
       }
 
-      const { error } = await supabase.from('kyc_records').insert({
+      const extraDocRows = [];
+      const uploadedExtraPaths = [];
+      const docMeta = {
+        driver_license: {
+          holder_name: form.driver_license_name || '',
+          number: form.driver_license_number || '',
+          license_class: form.driver_license_class || '',
+          issue_date: form.driver_license_issue_date || '',
+          expiry_date: form.driver_license_expiry_date || ''
+        },
+        vehicle_bluebook: {
+          vehicle_number: form.vehicle_number || '',
+          bluebook_number: form.bluebook_number || '',
+          owner_name: form.bluebook_owner_name || '',
+          issue_date: form.bluebook_issue_date || '',
+          renewal_date: form.bluebook_renewal_date || '',
+          expiry_date: form.bluebook_expiry_date || '',
+          vehicle_type: form.vehicle_type || '',
+          load_capacity: form.load_capacity || '',
+          capacity_unit: form.capacity_unit || 'ton',
+          vehicle_length: form.vehicle_length || ''
+        },
+        vehicle_insurance: {
+          company_name: form.insurance_company || '',
+          policy_number: form.insurance_policy_number || '',
+          insured_date: form.insurance_start_date || '',
+          expiry_date: form.insurance_expiry_date || ''
+        },
+        company_registration: {
+          company_name: form.company_name || '',
+          registration_number: form.company_registration_number || '',
+          issue_date: form.company_issue_date || '',
+          expiry_date: form.company_expiry_date || ''
+        },
+        business_registration: {
+          business_name: form.business_name || '',
+          business_type: form.business_type || '',
+          business_address: form.business_address || '',
+          representative_name: form.business_representative_name || '',
+          representative_position: form.business_representative_position || '',
+          registration_number: form.business_registration_number || '',
+          pan_vat_number: form.business_pan_vat_number || '',
+          goods_type: form.business_goods_type || '',
+          role_type: roleType || localStorage.getItem('load_role_type') || ''
+        },
+        business_pan: {
+          business_name: form.business_name || '',
+          business_type: form.business_type || '',
+          business_address: form.business_address || '',
+          representative_name: form.business_representative_name || '',
+          representative_position: form.business_representative_position || '',
+          registration_number: form.business_registration_number || '',
+          pan_vat_number: form.business_pan_vat_number || '',
+          goods_type: form.business_goods_type || '',
+          role_type: roleType || localStorage.getItem('load_role_type') || ''
+        }
+      };
+
+      try {
+        for (const [fileKey, file] of Object.entries(kycExtraDocs)) {
+          if (!file) continue;
+          const kind = fileKey.startsWith('driver_license_') ? 'driver_license'
+            : fileKey.startsWith('vehicle_bluebook_') ? 'vehicle_bluebook'
+            : fileKey.startsWith('vehicle_insurance_') ? 'vehicle_insurance'
+            : fileKey === 'company_registration' ? 'company_registration'
+          : fileKey === 'business_registration_document' ? 'business_registration'
+          : fileKey === 'business_pan_document' ? 'business_pan' : '';
+          if (!kind) continue;
+
+          const side = fileKey.endsWith('_front') ? 'front'
+            : fileKey.endsWith('_back') ? 'back' : 'document';
+          const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
+          const path = auth.user.id + '/' + stamp + '-' + fileKey + '-' + safeName;
+          const { error: uploadError } = await bucket.upload(path, file, {
+            contentType: file.type || 'application/octet-stream',
+            upsert: false
+          });
+          if (uploadError) throw uploadError;
+          uploadedExtraPaths.push(path);
+
+          const meta = docMeta[kind];
+          extraDocRows.push({
+            user_id: auth.user.id,
+            document_kind: kind,
+            document_side: side,
+            storage_path: path,
+            document_number: meta.number || meta.policy_number || meta.registration_number || null,
+            expiry_date: meta.expiry_date || null,
+            details: meta,
+            status: 'pending',
+            updated_at: new Date().toISOString()
+          });
+        }
+      } catch (extraUploadError) {
+        await bucket.remove([photoPath, frontPath, backPath, ...uploadedExtraPaths]);
+        throw extraUploadError;
+      }
+
+      const { data: savedKyc, error } = await supabase.from('kyc_records').insert({
         user_id: auth.user.id,
         role_category: localStorage.getItem('load_role_category') || '',
         role_type: localStorage.getItem('load_role_type') || '',
         full_name: form.full_name,
         phone: form.phone,
+        address_province: form.address_province,
+        address_district: form.address_district,
+        address_local_level: form.address_local_level,
+        address_ward: form.address_ward,
+        address_tole: form.address_tole,
+        address: [form.address_province, form.address_district, form.address_local_level, 'वडा ' + form.address_ward, form.address_tole].join(', '),
         document_type: form.document_type || 'citizenship',
         document_number: form.document_number,
         photo_path: photoPath,
         document_path: frontPath,
-        document_back_path: backPath
-      });
+        document_back_path: backPath,
+        status: 'pending'
+      }).select('id').single();
+
       if (error) {
-        await supabase.storage.from('kyc-private').remove([photoPath, frontPath, backPath]);
+        await bucket.remove([photoPath, frontPath, backPath, ...extraDocRows.map(d => d.storage_path)]);
         throw error;
       }
+
+      if (extraDocRows.length) {
+        const rows = extraDocRows.map(d => ({ ...d, kyc_record_id: savedKyc.id }));
+        const { error: docsError } = await supabase.from('kyc_documents').insert(rows);
+        if (docsError) {
+          await bucket.remove(extraDocRows.map(d => d.storage_path));
+          await supabase.from('kyc_records')
+            .update({ status: 'rejected', admin_note: 'अतिरिक्त कागजात सुरक्षित हुन सकेन; पुनः जाँच आवश्यक छ।' })
+            .eq('id', savedKyc.id);
+          throw new Error('मुख्य KYC दर्ता भयो, तर अतिरिक्त कागजातको विवरण सुरक्षित भएन: ' + docsError.message);
+        }
+      }
+
       setForm({});
       setKycPhotoFile(null);
       setKycFrontFile(null);
       setKycBackFile(null);
-      setMessage('KYC सुरक्षित भयो। Admin स्वीकृतिको प्रतीक्षामा छ।');
+      setKycExtraDocs({});
+      setAccountKycStatus('प्रतीक्षामा (Pending)');
+                                              setAccountKycNote('');
+                                              setPage('kyc-pending');
+                                              setMessage('');
     } catch (error) {
       setMessage('KYC सुरक्षित भएन: ' + (error.message || 'फेरि प्रयास गर्नुहोस्।'));
     }
@@ -1439,22 +1958,15 @@ function App() {
   const sections = [
     ['notifications', '🔔', tr('सूचनाहरू'), tr('सबै सूचनाहरू')],
     ['bookings', '📋', 'मेरा बुकिङ', 'बुकिङ सूची'],
-    ['kyc', '🪪', tr('KYC प्रमाणिकरण'), tr('पहिचान विवरण र कागजात')],
-    ['post', '📦', tr('लोड पोस्ट गर्नुहोस्'), tr('नयाँ सामान ढुवानीको विवरण')],
-    ['loads', '🔎', tr('लोड खोज्नुहोस्'), tr('उपलब्ध ढुवानीका कामहरू')],
-    ['truck', '🚛', tr('गाडी दर्ता गर्नुहोस्'), tr('गाडी र क्षमता विवरण')],
-    ['license', '🪪', tr('ड्राइभरको लाइसेन्स'), tr('लाइसेन्स विवरण र फोटो')],
-    ['bluebook', '📘', tr('गाडीको ब्लुबुक'), tr('गाडी दर्ता कागजात')],
-    ['insurance', '🛡️', tr('गाडीको इन्सुरेन्स'), tr('बीमा पोलिसी र म्याद')],
-    ['company', '🏢', tr('कम्पनीको विवरण'), tr('कम्पनीको नाम र दर्ता')],
-    ['waybill', '🧾', tr('भाडाको चलानी'), tr('ढुवानी चलानी तयार गर्नुहोस्')],
+    ['post', '📦', tr('ढुवानीका लागि गाडी खोज्नुहोस्'), tr('नयाँ सामान ढुवानीको विवरण')],
+    ['loads', '🔎', tr('गाडीका लागि लोड खोज्नुहोस्'), tr('उपलब्ध ढुवानीका कामहरू')],
   ];
-
   const titles = Object.fromEntries(sections.map(s => [s[0], s[2]]));
 
   return (
     <>
     <div className="app">
+      {!(authStep === 'complete' && role && !isAppAdmin && kycCheckComplete && (page === 'kyc' || page === 'kyc-pending')) && <>
       <header className="top">
         <div className="brandmark">LM</div>
         <div><h1>Load</h1><small>LOGISTICS & CARGO</small></div>
@@ -1463,30 +1975,61 @@ function App() {
           <button type="button" aria-label="सूचनाहरू" onClick={() => go('notifications')} style={{position:'relative',fontSize:23,border:0,borderRadius:10,padding:'6px 10px',background:'#102b46',color:'white'}}>🔔{notifications.filter(n => !n.is_read).length > 0 && <span style={{position:'absolute',top:-5,right:-5,minWidth:20,height:20,padding:'0 4px',boxSizing:'border-box',borderRadius:12,background:'#e00000',color:'white',fontSize:10,fontWeight:'bold',display:'flex',alignItems:'center',justifyContent:'center',border:'1px solid white'}}>{notifications.filter(n => !n.is_read).length <= 5 ? notifications.filter(n => !n.is_read).length : Math.floor((notifications.filter(n => !n.is_read).length - 1) / 5) * 5 + '+'}</span>}</button>
           <button type="button" aria-label="मुख्य मेनु"  onClick={() => {setMainMenuOpen(!mainMenuOpen);setLanguageMenuOpen(false);}} style={{fontSize:27,border:0,borderRadius:10,padding:'4px 12px',background:'#102b46',color:'white'}}>⋮</button>
           {mainMenuOpen && <div style={{position:'absolute',right:0,top:'110%',zIndex:10000,width:235,maxHeight:'75vh',overflowY:'auto',background:'white',color:'#102b46',borderRadius:12,boxShadow:'0 4px 18px #0005',padding:6}}>
-            {[['settings-account','👤','Account'],['settings-privacy','🔐','Privacy'],['settings-lists','📋','Lists'],['settings-storage','💾','Storage and Data'],['settings-language','🌐','App Language'],['settings-help','❓','Help'],['settings-city','📍','City'],['settings-history','🕘','Request History']].map(([key,icon,label]) => <button key={key} type="button" onClick={() => {if(key==='settings-language'){setLanguageMenuOpen(!languageMenuOpen);}else{setMainMenuOpen(false);setLanguageMenuOpen(false);go(key);}}} style={{display:'block',width:'100%',textAlign:'left',padding:'12px 10px',border:0,borderRadius:8,background:'white',color:'#102b46',fontSize:15}}>{icon} {label}</button>)}
-            {languageMenuOpen && <div style={{padding:6,background:'#eef3f8',borderRadius:10}}>{[['नेपाली','🇳🇵'],['English','🇬🇧'],['हिन्दी','🇮🇳'],['中文','🇨🇳']].map(([name,flag]) => <button key={name} type="button" onClick={() => {setLanguage(name);setLanguageMenuOpen(false);setMainMenuOpen(false);}} style={{display:'block',width:'100%',textAlign:'left',padding:10,border:0,borderRadius:8,background:language===name?'#d8e7f5':'transparent',color:'#102b46'}}>{flag} {name}</button>)}</div>}
+            {[['settings-account','👤','Account'],['settings-privacy','🔐','Privacy'],['settings-lists','📋','Lists'],['settings-storage','💾','Storage and Data'],['settings-language','🌐','App Language'],['settings-help','❓','Help'],['settings-city','📍','City'],['settings-history','🕘','Request History'],['kyc','🪪','KYC प्रमाणिकरण']].map(([key,icon,label]) => <button key={key} type="button" onClick={() => {if(key==='settings-language'){setLanguageMenuOpen(!languageMenuOpen);}else{setMainMenuOpen(false);setLanguageMenuOpen(false);go(key);}}} style={{display:'block',width:'100%',textAlign:'left',padding:'12px 10px',border:0,borderRadius:8,background:'white',color:'#102b46',fontSize:15}}>{icon} {label}</button>)}
+            {languageMenuOpen && <div style={{padding:6,background:'#eef3f8',borderRadius:10}}>{[['नेपाली','🇳🇵'],['English','🇬🇧'],['हिन्दी','🇮🇳'],['中文','🇨🇳']].map(([name,flag]) => <button key={name} type="button" onClick={() => {setLanguage(name);localStorage.setItem('load_language', name);setLanguageMenuOpen(false);setMainMenuOpen(false);}} style={{display:'block',width:'100%',textAlign:'left',padding:10,border:0,borderRadius:8,background:language===name?'#d8e7f5':'transparent',color:'#102b46'}}>{flag} {name}</button>)}</div>}
             <button type="button" onClick={() => {setMainMenuOpen(false);logout();}} style={{display:'block',width:'100%',textAlign:'left',padding:'12px 10px',border:0,borderTop:'1px solid #ddd',background:'white',color:'#c62828',fontSize:15}}>🚪 Logout</button>
           </div>}
         </div>
       </header>
 
-      <div className="welcome">
+      <div className={page === "home" ? "welcome home-welcome" : "welcome"}>
         <small>LM LOGISTICS & CARGO</small>
         <h2>{page === 'home' ? tr('तपाईंको ढुवानी, अब सजिलो!') : (titles[page] || ({'settings-account':'Account','settings-privacy':'Privacy','settings-lists':'Lists','settings-notifications':'Notifications','settings-storage':'Storage and Data','settings-language':'App Language','settings-help':'Help','settings-city':'City','settings-history':'Request History'}[page] || page))}</h2>
         <p>{tr('लोड खोज्नुहोस्। गाडी जोड्नुहोस्। कागजात व्यवस्थित राख्नुहोस्।')}</p>
-      </div>
-
-      {page === 'home' && <>
-        <div className="stats">
-          <button type="button" onClick={() => go('settings-history')} style={{background:'white',border:0,borderRadius:10,padding:12,color:'#102b46',cursor:'pointer'}}>
-            <b style={{display:'block',fontSize:22}}>{loads.length}</b>
-            <span>पोस्ट भएका लोड — विवरण हेर्नुहोस्</span>
+        {page === 'home' && <div className="home-summary">
+          <button type="button" onClick={() => go('settings-history')} className="summary-item">
+            <span>📦</span><b>{loads.length} लोड</b>
           </button>
-          <div><b>8</b><span>मुख्य सुविधाहरू</span></div>
-        </div>
+          <button type="button" onClick={() => go('bookings')} className="summary-item">
+            <span>📋</span><b>मेरो बुकिङ</b>
+          </button>
+        </div>}
+      </div>
+      </>}
+
+      {page === 'kyc-pending' && <div className="panel" style={{textAlign:'center',padding:24}}>
+                  <div style={{fontSize:48}}>⏳</div>
+                  <h3>KYC जाँच हुँदैछ</h3>
+                  <p>तपाईंका कागजात Admin ले जाँच गर्दै हुनुहुन्छ। स्वीकृति नआउँदासम्म अन्य सुविधा प्रयोग गर्न मिल्दैन।</p>
+                  <p><b>स्थिति:</b> Pending / प्रतीक्षामा</p>
+                  <button type="button" onClick={async () => {
+                    const { data: auth } = await supabase.auth.getUser();
+                    if (!auth?.user) return;
+                    const { data, error } = await supabase.from('kyc_records')
+                      .select('status, admin_note, created_at')
+                      .eq('user_id', auth.user.id)
+                      .order('created_at', {ascending:false}).limit(1);
+                    if (error) { setMessage('स्थिति जाँच्न सकिएन: ' + error.message); return; }
+                    const k = data?.[0];
+                    setAccountKycStatus(!k ? 'कागजात पेश गरिएको छैन' :
+                      ({pending:'प्रतीक्षामा (Pending)', approved:'स्वीकृत (Approved)', rejected:'अस्वीकृत (Rejected)'}[k.status] || k.status));
+                    setAccountKycNote(k?.admin_note || '');
+                    if (k?.status === 'approved') setPage('home');
+                    else if (k?.status === 'rejected') setPage('kyc');
+                    else setMessage('अहिले पनि Admin स्वीकृतिको प्रतीक्षामा छ।');
+                  }}>स्थिति फेरि जाँच्नुहोस्</button>
+                  {message && <p>{message}</p>}
+                </div>}
+                {page === 'home' && <>
+        
         <h3>{tr('तपाईंलाई के चाहिएको छ?')}</h3>
         <div className="menu">
-          {sections.map(s => (
+          {sections.filter(s => {
+              const category = localStorage.getItem('load_role_category');
+              if (category === 'seeker') return s[0] === 'post';
+              if (category === 'provider') return s[0] === 'loads';
+              return s[0] !== 'notifications' && s[0] !== 'bookings';
+            }).map(s => (
             <button className="tile" key={s[0]} onClick={() => go(s[0])}>
               <span className="tileicon">{s[1]}</span>
               <b>{s[2]}</b><small>{s[3]}</small><span className="arrow">›</span>
@@ -1521,11 +2064,29 @@ function App() {
       </form>}
       {page === 'kyc' && <form onSubmit={saveKyc} className="panel">
         <h3>KYC प्रमाणिकरण</h3>
+        {message && <p style={{color:'#b91c1c',background:'#fff1f2',padding:12,borderRadius:8}}>{message}</p>}
+                {accountKycStatus === 'अस्वीकृत (Rejected)' && accountKycNote &&
+                  <p style={{color:'#b91c1c',background:'#fff1f2',padding:12,borderRadius:8}}>Admin को कारण: {accountKycNote}</p>}
         <label className="field">पूरा नाम
           <input required value={form.full_name || ''} onChange={e => setForm({...form, full_name:e.target.value})}/>
         </label>
         <label className="field">मोबाइल नम्बर
           <input required type="tel" value={form.phone || ''} onChange={e => setForm({...form, phone:e.target.value})}/>
+        </label>
+        <label className="field">प्रदेश
+          <input required value={form.address_province || ''} onChange={e => setForm({...form, address_province:e.target.value})} placeholder="प्रदेशको नाम"/>
+        </label>
+        <label className="field">जिल्ला
+          <input required value={form.address_district || ''} onChange={e => setForm({...form, address_district:e.target.value})} placeholder="जिल्लाको नाम"/>
+        </label>
+        <label className="field">स्थानीय तह
+          <input required value={form.address_local_level || ''} onChange={e => setForm({...form, address_local_level:e.target.value})} placeholder="महानगरपालिका / उपमहानगरपालिका / नगरपालिका / गाउँपालिका"/>
+        </label>
+        <label className="field">वडा नम्बर
+          <input required type="number" min="1" value={form.address_ward || ''} onChange={e => setForm({...form, address_ward:e.target.value})}/>
+        </label>
+        <label className="field">टोल
+          <input required value={form.address_tole || ''} onChange={e => setForm({...form, address_tole:e.target.value})} placeholder="टोलको नाम"/>
         </label>
         <label className="field">पासपोर्ट साइजको आफ्नो फोटो *
           <input required type="file" accept="image/*" capture="user" onChange={e => setKycPhotoFile(e.target.files?.[0] || null)}/>
@@ -1547,7 +2108,138 @@ function App() {
         <label className="field">कागजातको पछाडिको फोटो
           <input required type="file" accept="image/*" capture="environment" onChange={e => setKycBackFile(e.target.files?.[0] || null)}/>
         </label>
-        <p>तपाईंको कागजात निजी भण्डारणमा राखिनेछ।</p>
+        <label className="field">भूमिका / व्यवसायको प्रकार
+          <select required value={roleType}
+            onChange={e => {
+              const category = localStorage.getItem('load_role_category') || '';
+              const groups = roleGroups[language] || roleGroups['नेपाली'];
+              const group = groups.find(g => g.key === category);
+              const selected = group?.options.find(([, name]) => name === e.target.value);
+              if (selected) {
+                localStorage.setItem('load_role_type', selected[1]);
+                localStorage.setItem('load_role', selected[0]);
+                setRoleType(selected[1]);
+                setRole(selected[0]);
+              }
+            }}>
+            <option value="">आफ्नो प्रकार छान्नुहोस्</option>
+            {(roleGroups[language] || roleGroups['नेपाली'])
+              .find(g => g.key === (localStorage.getItem('load_role_category') || ''))
+              ?.options.map(([key, name], i) => (
+                <option key={key + '-' + i} value={name}>{name}</option>
+              ))}
+          </select>
+        </label>
+        {(() => {
+        const rk = localStorage.getItem('load_role') || '';
+        const rt = roleType || localStorage.getItem('load_role_type') || '';
+        const isDriver = rk === 'driver';
+        const isOwner = rk === 'owner';
+        const isTransport = rk === 'transport';
+        const isCompany = isTransport && /कम्पनी|company|परिवहन|运输公司/i.test(rt);
+        const isPersonal = rt === 'व्यक्तिगत' || rt === 'Individual' || rt === '个人';
+        const isShop = /पसले|व्यापारी|Shopkeeper|trader|दुकानदार|店主|贸易商/i.test(rt);
+        const isFactory = /फ्याक्ट्री|उद्योग|Factory|industry|工厂|工业/i.test(rt);
+        const isContractor = /ठेकेदार|निर्माण कम्पनी|Contractor|construction|承包商|建筑公司/i.test(rt);
+        const isOnlineShop = /अनलाइन पसल|वितरक|Online shop|distributor|ऑनलाइन दुकान|网店|分销商/i.test(rt);
+        const isOtherBusiness = /अन्य व्यवसाय|Other business|अन्य व्यवसाय|Other business|其他企业/i.test(rt);
+        const isBusinessSeeker = isShop || isFactory || isContractor || isOnlineShop || isOtherBusiness;
+        const showVehicle = isDriver || isOwner || isTransport;
+        const field = (label, key, type='text', required=true) => (
+          <label className="field" key={key}>{label}
+            <input type={type} required={required}
+              value={form[key] || ''}
+              onChange={e => setForm(old => ({...old, [key]:e.target.value}))}/>
+          </label>
+        );
+        const fileField = (label, key) => (
+          <label className="field" key={key}>{label}
+            <input type="file" required accept="image/*,.pdf" capture="environment"
+              onChange={e => setKycExtraDocs(old => ({...old, [key]:e.target.files?.[0] || null}))}/>
+          </label>
+        );
+        return <>
+          {isPersonal && <section className="panel">
+            <h4>व्यक्तिगत सामान ढुवानी विवरण</h4>
+            {field('ढुवानीको प्रयोजन','personal_transport_purpose')}
+            {field('सामानको प्रकार','personal_goods_type')}
+            {field('थप जानकारी','personal_transport_notes','text',false)}
+          </section>}
+          {isBusinessSeeker && <section className="panel">
+            <h4>{isShop ? 'पसल तथा व्यापारी विवरण' : isFactory ? 'फ्याक्ट्री तथा उद्योग विवरण' : isContractor ? 'ठेकेदार तथा निर्माण कम्पनी विवरण' : isOnlineShop ? 'अनलाइन पसल तथा वितरक विवरण' : 'अन्य व्यवसाय तथा संस्था विवरण'}</h4>
+            {field(isShop ? 'पसलको नाम' : isFactory ? 'फ्याक्ट्री / उद्योगको नाम' : isContractor ? 'कम्पनी / ठेकेदारको नाम' : isOnlineShop ? 'अनलाइन पसल / वितरकको नाम' : 'व्यवसाय / संस्थाको नाम','business_name')}
+            {field('व्यवसायको प्रकार','business_type')}
+            {field('व्यवसायको ठेगाना','business_address')}
+            {field('प्रतिनिधिको पूरा नाम','business_representative_name')}
+            {field('प्रतिनिधिको पद','business_representative_position')}
+            {field('दर्ता नम्बर (दर्ता भएको भए)','business_registration_number','text',false)}
+            {field('PAN/VAT नम्बर (लागू भएमा)','business_pan_vat_number','text',false)}
+            {fileField('व्यवसाय दर्ता प्रमाणपत्र (लागू भएमा)','business_registration_document')}
+            {fileField('PAN/VAT प्रमाणपत्र (उपलब्ध भएमा)','business_pan_document')}
+            {field('ढुवानी गरिने सामानको प्रकार','business_goods_type')}
+          </section>}
+          {(isDriver || isOwner) && <section className="panel">
+            <h4>ड्राइभिङ लाइसेन्स KYC</h4>
+            {field('लाइसेन्स नम्बर','driver_license_number')}
+            {field('लाइसेन्सवालाको पूरा नाम','driver_license_name')}
+            {field('लाइसेन्सको वर्ग','driver_license_class')}
+            {field('लाइसेन्स जारी/बनाएको मिति','driver_license_issue_date','date')}
+            {field('लाइसेन्स म्याद सकिने मिति','driver_license_expiry_date','date')}
+            {fileField('लाइसेन्सको अगाडिको फोटो','driver_license_front')}
+            {fileField('लाइसेन्सको पछाडिको फोटो','driver_license_back')}
+          </section>}
+
+          {showVehicle && <section className="panel">
+            <h4>गाडी तथा ब्लुबुक KYC</h4>
+            <label className="field">गाडीको प्रकार
+              <select required value={form.vehicle_type || ''} onChange={e => setForm(old => ({...old, vehicle_type:e.target.value}))}>
+                <option value="">गाडी छान्नुहोस्</option>
+                <option>साइकल</option><option>मोटरसाइकल</option>
+                <option>तीनपाङ्ग्रे कार्गो</option><option>पिकअप</option>
+                <option>मिनी ट्रक</option><option>कार्गो भ्यान</option>
+                <option>६ चक्के ट्रक</option><option>८ चक्के ट्रक</option>
+                <option>१० चक्के ट्रक</option><option>१२ चक्के ट्रक</option>
+                <option>१४ चक्के ट्रक</option><option>अन्य व्यावसायिक गाडी</option>
+              </select>
+            </label>
+            {field('गाडी नम्बर','vehicle_number')}
+            {field('ब्लुबुक नम्बर','bluebook_number')}
+            {field('ब्लुबुकमा लेखिएको गाडीधनीको पूरा नाम','bluebook_owner_name')}
+            {field('ब्लुबुक जारी भएको मिति','bluebook_issue_date','date')}
+            {field('ब्लुबुक नवीकरण गरेको मिति','bluebook_renewal_date','date')}
+            {field('ब्लुबुक नवीकरणको म्याद सकिने मिति','bluebook_expiry_date','date')}
+            {field('गाडीको लोड क्षमता (अङ्क)','load_capacity','number')}
+            <label className="field">क्षमता एकाइ
+              <select required value={form.capacity_unit || 'ton'} onChange={e => setForm(old => ({...old, capacity_unit:e.target.value}))}>
+                <option value="kg">केजी</option><option value="ton">टन</option>
+              </select>
+            </label>
+            {field('गाडीको लम्बाइ (फिट)','vehicle_length','number',false)}
+            {fileField('ब्लुबुकको अगाडिको फोटो','vehicle_bluebook_front')}
+            {fileField('ब्लुबुकको पछाडिको फोटो','vehicle_bluebook_back')}
+          </section>}
+
+          {showVehicle && <section className="panel">
+            <h4>गाडीको इन्स्योरेन्स KYC</h4>
+            {field('बीमा कम्पनीको नाम','insurance_company')}
+            {field('बीमा पोलिसी नम्बर','insurance_policy_number')}
+            {field('बीमा गरेको मिति','insurance_start_date','date')}
+            {field('बीमा सकिने मिति','insurance_expiry_date','date')}
+            {fileField('बीमा कागजातको अगाडिको फोटो','vehicle_insurance_front')}
+            {fileField('बीमा कागजातको पछाडिको फोटो','vehicle_insurance_back')}
+          </section>}
+
+          {isCompany && <section className="panel">
+            <h4>यातायात कम्पनी KYC</h4>
+            {field('कम्पनीको नाम','company_name')}
+            {field('कम्पनी दर्ता नम्बर','company_registration_number')}
+            {field('कम्पनी दर्ता भएको मिति','company_issue_date','date')}
+            {field('दर्ता प्रमाणपत्रको म्याद सकिने मिति','company_expiry_date','date',false)}
+            {fileField('कम्पनी दर्ता प्रमाणपत्र','company_registration')}
+          </section>}
+        </>;
+      })()}
+      <p>तपाईंको कागजात निजी भण्डारणमा राखिनेछ।</p>
         <button className="primary">KYC सुरक्षित गर्नुहोस्</button>
       </form>}
 
@@ -1556,6 +2248,20 @@ function App() {
       {page === 'bookings' && <div className="panel">
         <h3>मेरा बुकिङ</h3>
         {chatError && <p>{chatError}</p>}
+        {vehicleBookingsError && <p style={{color:'#b91c1c'}}>{vehicleBookingsError}</p>}
+        <h4>🚚 म्यापबाट गरिएका बुकिङ</h4>
+        {vehicleBookings.length === 0 && !vehicleBookingsError && <p>म्याप बुकिङ छैन।</p>}
+        {vehicleBookings.map(r => <div key={'vehicle-'+r.id} className="loadcard">
+          <b>{r.vehicle_name || r.vehicle_type || 'मालवाहक गाडी'}</b>
+          <p>बुकिङकर्ता: {r.requester_name || 'नाम छैन'} · {r.requester_type || ''}</p>
+          {r.requester_company && <p>कम्पनी: {r.requester_company}</p>}
+          {r.requester_phone && <p>सम्पर्क: {r.requester_phone}</p>}
+          <p>उठाउने स्थान: {r.pickup_location || 'उल्लेख छैन'} → गन्तव्य: {r.destination || 'उल्लेख छैन'}</p>
+          <p>सामान: {r.cargo_details || 'विवरण छैन'}</p>
+          <p>प्रस्तावित भाडा: {r.proposed_fare == null ? 'उल्लेख छैन' : 'रु. '+Number(r.proposed_fare).toLocaleString('en-IN')}</p>
+          <p>स्थिति: {{pending:'🟡 निर्णय बाँकी',accepted:'🔵 स्वीकार भयो',rejected:'❌ अस्वीकार भयो',completed:'🏁 पूरा भयो',cancelled:'रद्द भयो'}[r.status] || r.status}</p>
+          <small>मिति: {r.created_at ? new Date(r.created_at).toLocaleString() : 'उपलब्ध छैन'}</small>
+        </div>)}
         {bookings.length === 0 ? <p>अहिलेसम्म बुकिङ छैन।</p> :
           bookings.map(b => {
             const l = loads.find(x => x.id === b.load_id);
@@ -1671,31 +2377,55 @@ function App() {
       </form>}
 
       {page === 'loads' && <div className="panel">
-        <h3>{tr('उपलब्ध लोडहरू')}</h3>
-        {loads.length === 0 ? <p>अहिलेसम्म लोड पोस्ट गरिएको छैन। सुरु गर्न तलको बटन थिच्नुहोस्।</p> :
-          loads.map(l => <div className="loadcard" key={l.id}>
-            <b>{l.origin} → {l.destination}</b>
-            <p>{l.cargo} · {l.weight}</p>
-            <strong>रु. {l.price || 'तोकिएको छैन'}</strong>
-            {l.owner_id === currentUserId ? (
-              <button type="button" onClick={() => cancelLoadPost(l)}>आफ्नो लोड पोस्ट रद्द गर्नुहोस्</button>
-            ) : (
-              <button className="primary" onClick={() => createBooking(l)}>बुकिङ अनुरोध पठाउनुहोस्</button>
-            )}
-          </div>)}
-        <button className="primary" onClick={() => go('post')}>＋ {tr('नयाँ लोड पोस्ट')}</button>
+        <h3>🚚 गाडी उपलब्ध गराउनुहोस् — लोडका लागि पोस्ट</h3>
+        <p>गाडीको स्थायी विवरण स्वीकृत KYC बाट स्वतः भरिन्छ।</p>
+        <form onSubmit={save} className="panel">
+          <div className="field"><label>गाडीधनी / सेवा प्रदायक</label><input value={providerVehicle.name || ''} readOnly /></div>
+          <div className="field"><label>गाडी नम्बर (स्वीकृत KYC)</label><input value={providerVehicle.number || ''} readOnly /></div>
+          <div className="field"><label>गाडीको प्रकार (स्वीकृत KYC)</label><input value={providerVehicle.type || ''} readOnly /></div>
+          <div className="field"><label>लोड क्षमता (स्वीकृत KYC)</label><input value={providerVehicle.capacity ? providerVehicle.capacity + ' ' + (providerVehicle.unit || 'ton') : ''} readOnly /></div>
+          <div className="field"><label>सम्पर्क नम्बर</label><input type="tel" value={form.provider_phone ?? providerVehicle.phone ?? ''} onChange={e => setForm(prev => ({...prev, provider_phone:e.target.value}))} required /></div>
+          <div className="field"><label>गाडीको हालको स्थान</label><input value={form.provider_origin || ''} onChange={e => setForm(prev => ({...prev, provider_origin:e.target.value}))} required /></div>
+          <button type="button" className="primary" onClick={() => {
+            if (!navigator.geolocation) {
+              setMessage('यो मोबाइलमा GPS उपलब्ध छैन।');
+              return;
+            }
+            navigator.geolocation.getCurrentPosition(
+              pos => {
+                setForm(prev => ({
+                  ...prev,
+                  provider_origin_latitude: pos.coords.latitude,
+                  provider_origin_longitude: pos.coords.longitude,
+                  provider_origin: prev.provider_origin || 'GPS स्थान प्राप्त भयो'
+                }));
+                setMessage('गाडीको GPS स्थान प्राप्त भयो।');
+              },
+              () => setMessage('GPS स्थान लिन सकिएन। मोबाइलको Location अनुमति खोल्नुहोस्।'),
+              {enableHighAccuracy:true, timeout:15000}
+            );
+          }}>📍 हालको GPS स्थान लिनुहोस्</button>
+          {form.provider_origin_latitude != null && <small>GPS स्थान प्राप्त भयो ✓</small>}
+          <div className="field"><label>गाडी जान सक्ने गन्तव्य</label><input value={form.provider_destination || ''} onChange={e => setForm(prev => ({...prev, provider_destination:e.target.value}))} required /></div>
+          <div className="field"><label>उपलब्ध हुने मिति/समय (वैकल्पिक)</label><input type="datetime-local" value={form.provider_available_at || ''} onChange={e => setForm(prev => ({...prev, provider_available_at:e.target.value}))} /></div>
+          <div className="field"><label>प्रस्तावित भाडा (रु., वैकल्पिक)</label><input type="number" min="0" value={form.provider_price || ''} onChange={e => setForm(prev => ({...prev, provider_price:e.target.value}))} /></div>
+          {!providerVehicle.number && <p>गाडीको विवरण नदेखिए स्वीकृत KYC जाँच गर्नुहोस्।</p>}
+          <button className="primary" type="submit" disabled={!providerVehicle.number || !providerVehicle.type}>🚚 गाडीको पोस्ट सुरक्षित गर्नुहोस्</button>
+        </form>
+        
       </div>}
 
-      {page === 'truck' && <form onSubmit={save} className="panel">
-        <h3>{tr('गाडीको विवरण')}</h3>
-        {field(tr('गाडी नम्बर'), 'vehicleNo')}
-        {field(tr('गाडीको प्रकार'), 'vehicleType')}
-        {field(tr('सामान बोक्ने क्षमता'), 'capacity')}
-        {field(tr('गाडी धनीको नाम'), 'owner')}
-        {field(tr('सम्पर्क नम्बर'), 'phone', 'tel')}
-        {field(tr('ब्लुबुक फोटो (पछि अपलोड गर्न मिल्ने)'), 'bluebookPhoto', 'file')}
-        <button className="primary">{tr('गाडीको विवरण सुरक्षित गर्नुहोस्')}</button>
-      </form>}
+      {page === 'truck' && <div className="panel">
+<h3>🚚 गाडी उपलब्ध गराउनुहोस्</h3>
+<p>गाडीको प्रकार, नम्बर र क्षमता स्वीकृत KYC बाट देखाइनेछ।</p>
+<div className="field"><label>गाडीधनी / सेवा प्रदायक</label><input value={providerVehicle.name || ""} readOnly /></div>
+<div className="field"><label>सम्पर्क नम्बर</label><input value={providerVehicle.phone || ""} readOnly /></div>
+<div className="field"><label>गाडी नम्बर</label><input value={providerVehicle.number || ""} readOnly /></div>
+<div className="field"><label>गाडीको प्रकार</label><input value={providerVehicle.type || ""} readOnly /></div>
+<div className="field"><label>लोड क्षमता</label><input value={providerVehicle.capacity ? providerVehicle.capacity + " " + providerVehicle.unit : ""} readOnly /></div>
+{!providerVehicle.number && <p>गाडीको विवरण नदेखिए स्वीकृत KYC जाँच गर्नुहोस्।</p>}
+<button type="button" className="primary" onClick={() => go('loads')}>उपलब्ध लोडहरू हेर्नुहोस्</button>
+</div>}
 
       {['license', 'bluebook', 'insurance'].includes(page) &&
         <form onSubmit={save} className="panel">
@@ -1792,11 +2522,11 @@ function App() {
 </div><p>नोट: यहाँ देखाइएको अवस्था हालको कोड र डाटाबेस सेटअपमा आधारित छ; वास्तविक कारोबार परीक्षण गरिएको छैन।</p></>}
 {page === 'settings-admin-users' && <><h3>प्रयोगकर्ता व्यवस्थापन</h3><input value={adminUsersSearch} onChange={e=>setAdminUsersSearch(e.target.value)} placeholder="नाम, फोन, इमेल वा User ID खोज्नुहोस्" style={{width:'100%',padding:12,boxSizing:'border-box'}}/><p>{adminOperationsMessage}</p>{adminUsers.filter(u=>[u.display_name,u.phone,u.email,u.user_id,u.account_status].some(v=>String(v||'').toLowerCase().includes(adminUsersSearch.toLowerCase()))).map(u=><details key={u.user_id} style={{border:'1px solid #ddd',borderRadius:10,padding:12,margin:'10px 0',overflowWrap:'anywhere'}}><summary>{u.display_name||'नाम छैन'} · {u.account_status||'स्थिति छैन'}</summary><p>फोन: {u.phone||'—'}</p><p>इमेल: {u.email||'—'}</p><p>ठेगाना: {u.address||'—'}</p><p>User ID: {u.user_id}</p><p>खाता स्थिति: {u.account_status||'—'}</p></details>)}{adminUsers.length===0&&<p>प्रयोगकर्ता सूची खाली छ वा डाटाबेसले पहुँच दिएन।</p>}</>}
 {page === 'settings-admin-loads' && <><h3>Loads / ढुवानी सूची</h3><input value={adminOperationsSearch} onChange={e=>setAdminOperationsSearch(e.target.value)} placeholder="स्थान, सामान वा स्थिति खोज्नुहोस्" style={{width:'100%',padding:12,boxSizing:'border-box'}}/><select value={adminOperationsFilter} onChange={e=>setAdminOperationsFilter(e.target.value)} style={{width:'100%',padding:12,marginTop:8}}><option value="all">सबै स्थिति</option><option value="open">खुला</option><option value="completed">पूरा</option><option value="cancelled">रद्द</option></select><p>{adminOperationsMessage}</p>{adminLoads.filter(l=>(adminOperationsFilter==='all'||String(l.status||'').toLowerCase()===adminOperationsFilter)&&[l.origin,l.destination,l.cargo,l.status,l.owner_id].some(v=>String(v||'').toLowerCase().includes(adminOperationsSearch.toLowerCase()))).map(l=><details key={l.id} style={{border:'1px solid #ddd',borderRadius:10,padding:12,margin:'10px 0',overflowWrap:'anywhere'}}><summary>{l.origin||'स्थान छैन'} → {l.destination||'स्थान छैन'} · {l.status}</summary><p>सामान: {l.cargo||'—'}</p><p>तौल: {l.weight??'—'}</p><p>भाडा: रु. {l.proposed_price??'—'}</p><p>लोड ID: {l.id}</p><p>मालिक ID: {l.owner_id}</p><p>मिति: {l.created_at?new Date(l.created_at).toLocaleString():'—'}</p></details>)}{adminLoads.length===0&&<p>लोड भेटिएन वा डाटाबेस अनुमति जाँच आवश्यक छ।</p>}</>}
-{page === 'settings-admin-bookings' && <><h3>Bookings / बुकिङ सूची</h3><input value={adminOperationsSearch} onChange={e=>setAdminOperationsSearch(e.target.value)} placeholder="बुकिङ ID, स्थिति वा प्रयोगकर्ता ID खोज्नुहोस्" style={{width:'100%',padding:12,boxSizing:'border-box'}}/><select value={adminOperationsFilter} onChange={e=>setAdminOperationsFilter(e.target.value)} style={{width:'100%',padding:12,marginTop:8}}><option value="all">सबै स्थिति</option><option value="pending">प्रतीक्षामा</option><option value="completed">पूरा</option><option value="cancelled">रद्द</option></select><p>{adminOperationsMessage}</p>{adminBookings.filter(b=>(adminOperationsFilter==='all'||String(b.status||'').toLowerCase()===adminOperationsFilter)&&[b.id,b.load_id,b.customer_id,b.driver_id,b.status,b.cancellation_status,b.cancellation_reason].some(v=>String(v||'').toLowerCase().includes(adminOperationsSearch.toLowerCase()))).map(b=><details key={b.id} style={{border:'1px solid #ddd',borderRadius:10,padding:12,margin:'10px 0',overflowWrap:'anywhere'}}><summary>बुकिङ {b.id} · {b.status}</summary><p>लोड ID: {b.load_id}</p><p>ग्राहक ID: {b.customer_id}</p><p>ड्राइभर ID: {b.driver_id}</p><p>दूरी: {b.actual_distance_km??'—'} km</p><p>वास्तविक भाडा: रु. {b.actual_fare??'—'}</p><p>रद्द अवस्था: {b.cancellation_status||'—'}</p><p>रद्द कारण: {b.cancellation_reason||'—'}</p><p>मिति: {b.created_at?new Date(b.created_at).toLocaleString():'—'}</p></details>)}{adminBookings.length===0&&<p>बुकिङ भेटिएन वा डाटाबेस अनुमति जाँच आवश्यक छ।</p>}</>}
+{page === 'settings-admin-bookings' && <><h3>Bookings / बुकिङ सूची</h3><input value={adminOperationsSearch} onChange={e=>setAdminOperationsSearch(e.target.value)} placeholder="बुकिङ ID, स्थिति वा प्रयोगकर्ता ID खोज्नुहोस्" style={{width:'100%',padding:12,boxSizing:'border-box'}}/><select value={adminOperationsFilter} onChange={e=>setAdminOperationsFilter(e.target.value)} style={{width:'100%',padding:12,marginTop:8}}><option value="all">सबै स्थिति</option><option value="pending">प्रतीक्षामा</option><option value="completed">पूरा</option><option value="cancelled">रद्द</option></select><p>{adminOperationsMessage}</p>{adminBookings.filter(b=>(adminOperationsFilter==='all'||String(b.status||'').toLowerCase()===adminOperationsFilter)&&[b.id,b.load_id,b.customer_id,b.driver_id,b.status,b.cancellation_status,b.cancellation_reason].some(v=>String(v||'').toLowerCase().includes(adminOperationsSearch.toLowerCase()))).map(b=><details key={b.id} style={{border:'1px solid #ddd',borderRadius:10,padding:12,margin:'10px 0',overflowWrap:'anywhere'}}><summary>बुकिङ {b.id} · {{completed:'✅ डेलिभरी पूरा',cancelled:'❌ रद्द भयो',pending:'🕒 प्रतीक्षामा',open:'🕒 प्रतीक्षामा',accepted:'🤝 स्वीकार भयो',rejected:'❌ अस्वीकार भयो',in_transit:'🚚 ढुवानी हुँदैछ'}[b.status] || b.status}</summary><p>लोड ID: {b.load_id}</p><p>ग्राहक ID: {b.customer_id}</p><p>ड्राइभर ID: {b.driver_id}</p><p>दूरी: {b.actual_distance_km??'—'} km</p><p>वास्तविक भाडा: रु. {b.actual_fare??'—'}</p><p>रद्द अवस्था: {b.cancellation_status||'—'}</p><p>रद्द कारण: {b.cancellation_reason||'—'}</p><p>मिति: {b.created_at?new Date(b.created_at).toLocaleString():'—'}</p></details>)}{adminBookings.length===0&&<p>बुकिङ भेटिएन वा डाटाबेस अनुमति जाँच आवश्यक छ।</p>}</>}
 {page === 'settings-admin-applications' && <><h3>Admin आवेदनहरू / Admin Applications</h3>
             {adminApplicationsMessage && <p>{adminApplicationsMessage}</p>}
             {adminApplications.length===0 && !adminApplicationsMessage && <p>अहिलेसम्म आवेदन छैन।</p>}
-            {adminApplications.map(a=><details key={a.id} style={{border:"1px solid #ddd",borderRadius:10,padding:12,margin:"10px 0",overflowWrap:"anywhere"}}><summary style={{fontWeight:700,cursor:"pointer"}}>{a.full_name} · {a.status}</summary><p>इमेल: {a.email}</p><p>फोन: {a.phone}</p><p>कागजात: {a.id_type} · {a.id_number}</p><p>कारण: {a.application_reason||"-"}</p><p>कार्ययोजना: {a.work_plan||"-"}</p>{a.admin_note&&<p>Admin टिप्पणी: {a.admin_note}</p>}{a.status==="pending"&&<><button type="button" className="primary" onClick={async()=>{const {error}=await supabase.rpc("review_admin_application",{p_application_id:a.id,p_decision:"approved",p_admin_note:"स्वीकृत"});if(error)setAdminApplicationsMessage("स्वीकृत भएन: "+error.message);else{setAdminApplications(old=>old.map(x=>x.id===a.id?{...x,status:"approved",admin_note:"स्वीकृत"}:x));setAdminApplicationsMessage("आवेदन स्वीकृत भयो।")}}}>Approve / स्वीकृत</button><button type="button" style={{marginLeft:8,padding:10}} onClick={async()=>{const note=prompt("अस्वीकृत गर्नुको कारण लेख्नुहोस्:");if(note===null)return;const {error}=await supabase.rpc("review_admin_application",{p_application_id:a.id,p_decision:"rejected",p_admin_note:note});if(error)setAdminApplicationsMessage("Reject भएन: "+error.message);else{setAdminApplications(old=>old.map(x=>x.id===a.id?{...x,status:"rejected",admin_note:note}:x));setAdminApplicationsMessage("आवेदन अस्वीकृत भयो।")}}}>Reject / अस्वीकृत</button></>}</details>)}
+            {adminApplications.map(a=><details key={a.id} style={{border:"1px solid #ddd",borderRadius:10,padding:12,margin:"10px 0",overflowWrap:"anywhere"}}><summary style={{fontWeight:700,cursor:"pointer"}}>{a.full_name} · {a.status}</summary><p>इमेल: {a.email}</p><p>फोन: {a.phone}</p><p>कागजात: {a.id_type} · {a.id_number}</p><p>कारण: {a.application_reason||"-"}</p><p>कार्ययोजना: {a.work_plan||"-"}</p>{a.admin_note&&<p>Admin टिप्पणी: {a.admin_note}</p>}{isRootAdmin && a.status==="pending"&&<><button type="button" className="primary" onClick={async()=>{const {error}=await supabase.rpc("review_admin_application",{p_application_id:a.id,p_decision:"approved",p_admin_note:"स्वीकृत"});if(error)setAdminApplicationsMessage("स्वीकृत भएन: "+error.message);else{setAdminApplications(old=>old.map(x=>x.id===a.id?{...x,status:"approved",admin_note:"स्वीकृत"}:x));setAdminApplicationsMessage("आवेदन स्वीकृत भयो।")}}}>Approve / स्वीकृत</button><button type="button" style={{marginLeft:8,padding:10}} onClick={async()=>{const note=prompt("अस्वीकृत गर्नुको कारण लेख्नुहोस्:");if(note===null)return;const {error}=await supabase.rpc("review_admin_application",{p_application_id:a.id,p_decision:"rejected",p_admin_note:note});if(error)setAdminApplicationsMessage("Reject भएन: "+error.message);else{setAdminApplications(old=>old.map(x=>x.id===a.id?{...x,status:"rejected",admin_note:note}:x));setAdminApplicationsMessage("आवेदन अस्वीकृत भयो।")}}}>Reject / अस्वीकृत</button></>}</details>)}
             </>}{page === 'settings-admin-kyc' && <>{adminStats && <div style={{display:'grid',gridTemplateColumns:'repeat(2,minmax(0,1fr))',gap:8,margin:'12px 0'}}>
               {[
                 ['कुल खाता',adminStats.total_accounts],
@@ -1814,10 +2544,10 @@ function App() {
             {adminKyc.filter(k=>(adminKycFilter==='all'||k.status===adminKycFilter)&&[k.full_name,k.phone,k.document_type,k.document_number].some(v=>String(v||'').toLowerCase().includes(adminKycSearch.toLowerCase()))).map(k=><details key={k.id} style={{border:'1px solid #ddd',borderRadius:10,padding:12,margin:'10px 0',overflowWrap:'anywhere'}}>
               <summary style={{cursor:'pointer',fontWeight:700}}>{k.full_name||'नाम छैन'} · {k.phone||'फोन छैन'}<p style={{fontWeight:400,margin:'6px 0'}}>कागजात: {k.document_type||'उपलब्ध छैन'} · {k.created_at?new Date(k.created_at).toLocaleDateString():'मिति छैन'}</p><span>{({pending:'🟠 प्रतीक्षामा',approved:'🟢 स्वीकृत',rejected:'🔴 अस्वीकृत'})[k.status]||k.status}</span></summary>
               <p>प्रयोगकर्ता ID: {k.user_id}</p><p>कागजात नम्बर: {k.document_number||'उपलब्ध छैन'}</p>
-              {k.admin_note&&<p>टिप्पणी: {k.admin_note}</p>}{k.fileError&&<p>फाइल समस्या: {k.fileError}</p>}
-              {k.frontUrl&&<div><p>अगाडिको कागजात</p><a href={k.frontUrl} target="_blank" rel="noreferrer">फोटो खोल्नुहोस्</a><img src={k.frontUrl} alt="अगाडिको कागजात" style={{display:'block',width:'100%',maxWidth:360,marginTop:8,borderRadius:8}} /></div>}
+              {k.admin_note&&<p>टिप्पणी: {k.admin_note}</p>}{k.fileError&&<p>फाइल समस्या: {k.fileError}</p>}{k.photoUrl&&<div><p>पासपोर्ट साइजको फोटो</p><a href={k.photoUrl} target="_blank" rel="noreferrer">फोटो खोल्नुहोस्</a><img src={k.photoUrl} alt="पासपोर्ट साइजको फोटो" style={{display:'block',width:100,height:100,objectFit:'cover',borderRadius:'50%',marginTop:8}} /></div>}
+              {k.role_details&&Object.entries(k.role_details).some(([key,value])=>value!==''&&value!==null&&value!==undefined)&&<div style={{background:'#eef5ff',padding:12,borderRadius:8,margin:'10px 0',overflowWrap:'anywhere'}}><h4 style={{margin:'0 0 8px'}}>भूमिका अनुसार KYC विवरण</h4>{Object.entries(k.role_details).filter(([key,value])=>value!==''&&value!==null&&value!==undefined).map(([key,value])=><p key={key} style={{margin:'4px 0'}}><b>{{personal_transport_purpose:'ढुवानीको उद्देश्य',personal_goods_type:'सामानको प्रकार',personal_transport_notes:'थप विवरण',business_name:'व्यवसायको नाम',business_type:'व्यवसायको प्रकार',business_address:'व्यवसायको ठेगाना',business_representative_name:'प्रतिनिधिको नाम',business_representative_position:'प्रतिनिधिको पद',business_registration_number:'व्यवसाय दर्ता नम्बर',business_pan_vat_number:'PAN/VAT नम्बर',business_goods_type:'ढुवानी गर्ने सामान',driver_license_number:'लाइसेन्स नम्बर',driver_license_name:'लाइसेन्सधारीको नाम',driver_license_class:'लाइसेन्स वर्ग',driver_license_issue_date:'लाइसेन्स जारी मिति',driver_license_expiry_date:'लाइसेन्स म्याद',vehicle_type:'गाडीको प्रकार',vehicle_number:'गाडी नम्बर',bluebook_number:'ब्लुबुक नम्बर',bluebook_owner_name:'ब्लुबुकमा भएको गाडीधनी',bluebook_issue_date:'ब्लुबुक जारी मिति',bluebook_renewal_date:'ब्लुबुक नवीकरण मिति',bluebook_expiry_date:'ब्लुबुक म्याद',load_capacity:'भारवहन क्षमता',capacity_unit:'क्षमता एकाइ',vehicle_length:'गाडीको लम्बाइ',insurance_company:'बीमा कम्पनी',insurance_policy_number:'बीमा पोलिसी नम्बर',insurance_start_date:'बीमा सुरु मिति',insurance_expiry_date:'बीमा म्याद',company_name:'कम्पनीको नाम',company_registration_number:'कम्पनी दर्ता नम्बर',company_issue_date:'कम्पनी दर्ता मिति',company_expiry_date:'कम्पनी दर्ता म्याद',role_type:'छानिएको भूमिका'}[key]||key}:</b> {String(value)}</p>)}</div>}{k.frontUrl&&<div><p>अगाडिको कागजात</p><a href={k.frontUrl} target="_blank" rel="noreferrer">फोटो खोल्नुहोस्</a><img src={k.frontUrl} alt="अगाडिको कागजात" style={{display:'block',width:'100%',maxWidth:360,marginTop:8,borderRadius:8}} /></div>}
               {k.backUrl&&<div><p>पछाडिको कागजात</p><a href={k.backUrl} target="_blank" rel="noreferrer">फोटो खोल्नुहोस्</a><img src={k.backUrl} alt="पछाडिको कागजात" style={{display:'block',width:'100%',maxWidth:360,marginTop:8,borderRadius:8}} /></div>}
-              <button type="button" className="primary" onClick={()=>decideKyc(k.id,'approved')}>Approve / स्वीकृत</button><button type="button" style={{marginLeft:8,padding:10}} onClick={()=>decideKyc(k.id,'rejected')}>Reject / अस्वीकृत</button>
+              {adminKycDocuments.filter(d=>d.kyc_record_id===k.id||d.user_id===k.user_id).map(d=><div key={d.id} style={{border:'1px solid #ddd',borderRadius:8,padding:10,margin:'10px 0',overflowWrap:'anywhere'}}><p><b>अतिरिक्त कागजात:</b> {d.document_kind||'प्रकार उल्लेख छैन'} · {d.document_side||'पक्ष उल्लेख छैन'}</p><p>कागजात नम्बर: {d.document_number||'—'}</p>{d.details&&<div style={{background:'#f7f9fc',padding:8,borderRadius:6,margin:'8px 0'}}><b>कागजात/व्यवसाय विवरण:</b>{Object.entries(d.details).filter(([key,value])=>value!==''&&value!==null&&value!==undefined).map(([key,value])=><p key={key} style={{margin:'4px 0',overflowWrap:'anywhere'}}><b>{{business_name:'व्यवसायको नाम',business_type:'व्यवसायको प्रकार',business_address:'व्यवसायको ठेगाना',representative_name:'प्रतिनिधिको नाम',representative_position:'प्रतिनिधिको पद',registration_number:'दर्ता नम्बर',pan_vat_number:'PAN/VAT नम्बर',goods_type:'सामानको प्रकार',role_type:'भूमिका',number:'नम्बर',holder_name:'धनी/लाइसेन्सधारीको नाम',owner_name:'ब्लुबुकमा भएको गाडीधनीको नाम',company_name:'कम्पनी/इन्स्योरेन्सको नाम',policy_number:'बीमा पोलिसी नम्बर',insured_date:'बीमा सुरु मिति',expiry_date:'म्याद सकिने मिति'}[key]||key}:</b> {String(value)}</p>)}</div>}<p>म्याद: {d.expiry_date||'—'}</p><p>स्थिति: {({pending:'प्रतीक्षामा',approved:'स्वीकृत',rejected:'अस्वीकृत'})[d.status]||d.status||'—'}</p>{d.admin_note&&<p>Admin टिप्पणी: {d.admin_note}</p>}{d.fileError&&<p>फाइल समस्या: {d.fileError}</p>}{d.fileUrl&&<><a href={d.fileUrl} target="_blank" rel="noreferrer">कागजात खोल्नुहोस्</a><img src={d.fileUrl} alt="अतिरिक्त KYC कागजात" style={{display:'block',width:'100%',maxWidth:360,marginTop:8,borderRadius:8}} /></>}</div>)}<button type="button" className="primary" onClick={()=>decideKyc(k.id,'approved')}>Approve / स्वीकृत</button><button type="button" style={{marginLeft:8,padding:10}} onClick={()=>decideKyc(k.id,'rejected')}>Reject / अस्वीकृत</button>
             </details>)}
             {adminKyc.length===0&&<p>KYC सूची खाली छ वा लोड हुँदैछ।</p>}</>}
           </>}
@@ -2016,7 +2746,7 @@ function App() {
         {page === 'settings-language' && <>
           <h3>App Language / एपको भाषा</h3>
           {[['नेपाली','🇳🇵'],['English','🇬🇧'],['हिन्दी','🇮🇳'],['中文','🇨🇳']].map(([name,flag]) =>
-            <button key={name} type="button" onClick={() => setLanguage(name)} style={{display:'block',width:'100%',padding:13,margin:'8px 0',textAlign:'left',border:'1px solid #ddd',borderRadius:10,background:language===name?'#fff0df':'white',color:'#102b46'}}>{flag} {name} {language===name?'✓':''}</button>)}
+            <button key={name} type="button" onClick={() => {setLanguage(name);localStorage.setItem('load_language', name);}} style={{display:'block',width:'100%',padding:13,margin:'8px 0',textAlign:'left',border:'1px solid #ddd',borderRadius:10,background:language===name?'#fff0df':'white',color:'#102b46'}}>{flag} {name} {language===name?'✓':''}</button>)}
         </>}
         {page === 'settings-help' && (() => {
           const uid = currentUserId;
@@ -2075,6 +2805,7 @@ function App() {
           <button type="button" className="primary" onClick={() => setMessage(form.city ? 'सहर छानियो: '+form.city+' (अहिले यो सत्रमा मात्र)' : 'पहिले सहर लेख्नुहोस्।')}>Save City</button>
         </>}
         {page === 'settings-history' && (() => {
+          const historyVehicleBookings = vehicleBookings.filter(r => ['completed', 'cancelled'].includes(r.status));
           const completed = historyBookings.filter(b => b.status === 'completed');
           const earnings = completed.reduce((sum, b) => sum + (Number(b.actual_fare) || 0), 0);
           const kilometers = completed.reduce((sum, b) => sum + (Number(b.actual_distance_km) || 0), 0);
@@ -2087,7 +2818,18 @@ function App() {
               <div><b>{money(earnings)}</b><span>वास्तविक कमाइ</span></div>
               <div><b>{kilometers.toLocaleString('en-IN', {maximumFractionDigits:2})} km</b><span>वास्तविक दूरी</span></div>
             </div>
-            <h4>बुकिङ तथा ढुवानी</h4>
+            <h4>🗺️ म्यापबाट भएका बुकिङ</h4>
+        {historyVehicleBookings.length === 0 && <p>म्याप बुकिङ इतिहास छैन।</p>}
+        {historyVehicleBookings.map(r => <div key={'history-map-'+r.id} style={{border:'1px solid #ddd',borderRadius:10,padding:12,margin:'10px 0'}}>
+          <b>{r.vehicle_name || r.vehicle_type || 'मालवाहक गाडी'}</b>
+          <p>उठाउने स्थान: {r.pickup_location || 'उल्लेख छैन'} → गन्तव्य: {r.destination || 'उल्लेख छैन'}</p>
+          <p>सामान: {r.cargo_details || 'विवरण छैन'}</p>
+          <p>मिति: {new Date(r.created_at).toLocaleDateString()}</p>
+          <p style={{display:'inline-block',padding:'6px 12px',borderRadius:20,fontWeight:700,background:({pending:'#EFF6FF',accepted:'#FFF7E8',rejected:'#F3F4F6',completed:'#ECFDF3',cancelled:'#FEF2F2'}[r.status]||'#F3F4F6'),color:({pending:'#2563EB',accepted:'#B45309',rejected:'#6B7280',completed:'#15803D',cancelled:'#DC2626'}[r.status]||'#374151')}}>स्थिति: {{pending:'🕒 निर्णय बाँकी',accepted:'🤝 स्वीकार भयो',rejected:'❌ अस्वीकार भयो',completed:'✅ डेलिभरी पूरा',cancelled:'❌ रद्द भयो'}[r.status] || r.status}</p>
+          <p>प्रस्तावित भाडा: {r.proposed_fare == null ? 'रेकर्ड छैन' : money(Number(r.proposed_fare))}</p>
+          <p>वास्तविक दूरी र कमाइ: रेकर्ड छैन</p>
+        </div>)}
+        <h4>बुकिङ तथा ढुवानी</h4>
             {historyBookings.length === 0 && !historyError && <p>अहिलेसम्म बुकिङ इतिहास छैन।</p>}
             {historyBookings.map(b => {
               const load = historyLoads.find(l => l.id === b.load_id);
@@ -2095,27 +2837,34 @@ function App() {
                 <b>{load ? `${load.origin} → ${load.destination}` : 'लोड #' + String(b.load_id).slice(0,8)}</b>
                 {load && <p>{load.cargo || 'कार्गो'}{load.weight ? ` · ${load.weight}` : ''}</p>}
                 <p>मिति: {new Date(b.completed_at || b.created_at).toLocaleDateString()}</p>
-                <p>स्थिति: {b.status || 'उपलब्ध छैन'}</p>
+                <p style={{display:'inline-block',padding:'6px 12px',borderRadius:20,fontWeight:700,background:({completed:'#ECFDF3',cancelled:'#FEF2F2',open:'#EFF6FF',accepted:'#FFF7E8',rejected:'#F3F4F6',in_transit:'#EFF6FF'}[b.status]||'#F3F4F6'),color:({completed:'#15803D',cancelled:'#DC2626',open:'#2563EB',accepted:'#B45309',rejected:'#6B7280',in_transit:'#2563EB'}[b.status]||'#374151')}}>स्थिति: {{completed:'✅ डेलिभरी पूरा',cancelled:'❌ रद्द भयो',open:'🕒 अनुरोध पठाइएको',accepted:'🤝 स्वीकार भयो',rejected:'❌ अस्वीकार भयो',in_transit:'🚚 ढुवानी हुँदैछ'}[b.status] || b.status || 'उपलब्ध छैन'}</p>
                 <p>वास्तविक दूरी: {b.actual_distance_km == null ? 'रेकर्ड छैन' : `${b.actual_distance_km} km`}</p>
                 <p>वास्तविक भाडा: {b.actual_fare == null ? 'रेकर्ड छैन' : money(Number(b.actual_fare))}</p>
               </div>;
             })}
             <h4>मैले पोस्ट गरेका लोड</h4>
             {historyLoads.length === 0 && <p>पोस्ट गरेका लोड छैनन्।</p>}
-            {historyLoads.map(l => <div key={l.id} style={{border:'1px solid #ddd',borderRadius:10,padding:12,margin:'10px 0'}}>
+            {historyLoads.map(l => {
+              const expired = l.status === 'open' && l.expires_at && new Date(l.expires_at).getTime() <= Date.now();
+              const shownStatus = expired ? 'expired' : l.status;
+              return <div key={l.id} style={{border:'1px solid #ddd',borderRadius:10,padding:12,margin:'10px 0'}}>
               <b>{l.origin} → {l.destination}</b>
               <p>{l.cargo || 'कार्गो'}{l.weight ? ` · ${l.weight}` : ''}</p>
-              <p>मिति: {new Date(l.created_at).toLocaleDateString()} · स्थिति: {l.status}</p>
+              <p>मिति: {new Date(l.created_at).toLocaleDateString()}</p>
+              <p style={{display:'inline-block',padding:'6px 12px',borderRadius:20,fontWeight:700,background:({completed:'#ECFDF3',cancelled:'#FEF2F2',open:'#EFF6FF',expired:'#F3F4F6',accepted:'#FFF7E8',rejected:'#F3F4F6',in_transit:'#EFF6FF'}[shownStatus]||'#F3F4F6'),color:({completed:'#15803D',cancelled:'#DC2626',open:'#2563EB',expired:'#6B7280',accepted:'#B45309',rejected:'#6B7280',in_transit:'#2563EB'}[shownStatus]||'#374151')}}>स्थिति: {{completed:'✅ डेलिभरी पूरा',cancelled:'❌ रद्द भयो',open:'🕒 खुला',expired:'⌛ म्याद सकियो',accepted:'🤝 स्वीकार भयो',rejected:'❌ अस्वीकार भयो',in_transit:'🚚 ढुवानी हुँदैछ'}[shownStatus] || shownStatus}</p>
               <p>प्रस्तावित भाडा: {l.proposed_price == null ? 'उपलब्ध छैन' : money(Number(l.proposed_price))}</p>
-            </div>)}
+              {l.status === 'open' && !expired && <button type="button" onClick={() => cancelLoadPost(l)} style={{background:'#b91c1c',color:'white',border:0,borderRadius:8,padding:'10px 14px',marginTop:6}}>पोस्ट रद्द गर्नुहोस्</button>}
+              {expired && <button type="button" onClick={() => repostExpiredLoad(l)} style={{background:'#ea580c',color:'white',border:0,borderRadius:8,padding:'10px 14px',marginTop:6}}>🔄 फेरि पोस्ट गर्नुहोस्</button>}
+            </div>;
+            })}
           </>;
         })()}
       </div>}
 
       {message && <div className="notice">✓ {tr(message)}</div>}
 
-      {page !== 'home' && <button type="button" aria-label="पछाडि फर्कनुहोस्" onClick={goBack} style={floatingBack}>‹</button>}
 
+      {page !== "home" && <button type="button" aria-label="पछाडि फर्कनुहोस्" onClick={goBack} style={floatingBack}>‹</button>}
       <footer>LOAD · LM LOGISTICS & CARGO <small>{tr('ढुवानीको सजिलो साथी')}</small></footer>
     </div>
     </>

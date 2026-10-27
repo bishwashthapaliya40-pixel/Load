@@ -60,3 +60,14 @@ footer small{display:block;letter-spacing:0;margin-top:6px}
 .admin-nav{display:flex;flex-wrap:wrap;gap:8px;margin:12px 0 22px}
 .admin-nav button{padding:10px 12px;border:1px solid #d7e0eb;border-radius:10px;background:#f4f7fb;color:#102b46;font-weight:700}
 .admin-nav button:active{background:#ff6500;color:#fff}
+
+/* Compact home welcome layout */
+.home-welcome{position:relative;padding:16px 112px 16px 16px}
+.home-welcome h2{font-size:19px;margin:7px 0}
+.home-welcome p{font-size:11px;line-height:1.45}
+.home-welcome>small{font-size:9px;letter-spacing:.5px}
+.home-summary{position:absolute;right:7px;top:50%;transform:translateY(-50%);display:flex;flex-direction:column;align-items:stretch;gap:5px}
+.summary-item{display:flex;align-items:center;gap:4px;padding:5px 6px;background:#ffffff18;color:white;border:1px solid #ffffff40;border-radius:7px;font-size:10px;white-space:nowrap}
+.summary-item span{font-size:13px}
+.summary-item b{font-size:10px;color:white}
+@media(max-width:360px){.home-welcome{padding-right:100px}.home-welcome h2{font-size:17px}.summary-item{padding:4px;font-size:9px}}

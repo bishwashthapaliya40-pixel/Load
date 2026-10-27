@@ -26,6 +26,7 @@ export default function NearbyVehicleMap() {
   const markers = useRef(null);
   const watchId = useRef(null);
   const myPoint = useRef(null);
+  const myMarker = useRef(null);
   const [available, setAvailable] = useState(false);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState('');
@@ -67,7 +68,9 @@ export default function NearbyVehicleMap() {
     markers.current = L.layerGroup().addTo(map);
     maplibreGL({ style: 'https://tiles.openfreemap.org/styles/liberty' }).addTo(map);
     loadRequests();
+    const requestRefresh = setInterval(loadRequests, 3000);
     return () => {
+      clearInterval(requestRefresh);
       if (watchId.current !== null) navigator.geolocation?.clearWatch(watchId.current);
       map.remove();
       mapObj.current = null;
@@ -79,8 +82,9 @@ export default function NearbyVehicleMap() {
     const refresh = async () => {
       const { data, error } = await supabase
         .from('vehicle_locations')
-        .select('user_id,latitude,longitude,vehicle_type,vehicle_status,vehicle_name,wheel_count,capacity_kg,vehicle_photo_url,updated_at')
+        .select('user_id,latitude,longitude,vehicle_type,vehicle_status,vehicle_name,wheel_count,capacity_kg,vehicle_photo_url,updated_at,expires_at')
         .eq('is_available', true)
+        .gt('expires_at', new Date().toISOString())
         .eq('vehicle_status', 'available')
         .gte('updated_at', new Date(Date.now() - 2 * 60 * 1000).toISOString())
         .limit(300);
@@ -125,7 +129,7 @@ export default function NearbyVehicleMap() {
           if (btn) btn.onclick = () => {
             setSelected(v);
             setNotice('');
-            map.closePopup();
+            mapObj.current?.closePopup();
           };
         });
         marker.addTo(markers.current);
@@ -164,6 +168,7 @@ export default function NearbyVehicleMap() {
       const { data: auth, error: authError } = await supabase.auth.getUser();
       if (authError || !auth.user) throw new Error('पहिले लगइन गर्नुहोस्।');
 
+      const expiresAt = new Date(Date.now() + 60 * 60 * 1000).toISOString();
       watchId.current = navigator.geolocation.watchPosition(async pos => {
         const point = {
           user_id: auth.user.id,
@@ -171,9 +176,30 @@ export default function NearbyVehicleMap() {
           longitude: pos.coords.longitude,
           vehicle_type: localStorage.getItem('load_role_type') || role,
           is_available: true,
+          vehicle_status: 'available',
+          expires_at: expiresAt,
           updated_at: new Date().toISOString()
         };
         myPoint.current = { lat: point.latitude, lng: point.longitude };
+
+        const myIcon = L.divIcon({
+          className: 'load-my-vehicle-marker',
+          html: '<div style="font-size:34px;line-height:40px;text-align:center;filter:drop-shadow(0 1px 2px #777)">🚚</div>',
+          iconSize: [40, 40],
+          iconAnchor: [20, 20]
+        });
+
+        if (mapObj.current) {
+          if (myMarker.current) {
+            myMarker.current.setLatLng([point.latitude, point.longitude]);
+          } else {
+            myMarker.current = L.marker(
+              [point.latitude, point.longitude],
+              { icon: myIcon, zIndexOffset: 1000 }
+            ).addTo(mapObj.current).bindPopup('📍 तपाईंको लाइभ गाडी लोकेशन');
+          }
+        }
+
         const { error } = await supabase.from('vehicle_locations')
           .upsert(point, { onConflict: 'user_id' });
         if (error) {
@@ -197,6 +223,21 @@ export default function NearbyVehicleMap() {
     }
   };
 
+  const requireApprovedKyc = async userId => {
+    const { data: rows, error } = await supabase
+      .from('kyc_records')
+      .select('status, created_at')
+      .eq('user_id', userId)
+      .order('created_at', { ascending: false })
+      .limit(1);
+    if (error) throw error;
+    const kyc = rows?.[0];
+    if (!kyc) throw new Error('पहिले KYC भर्नुहोस्।');
+    if (kyc.status !== 'approved') {
+      throw new Error('Admin ले KYC स्वीकृत नगरेसम्म सुविधा चल्दैन।');
+    }
+  };
+
   const sendRequest = async e => {
     e.preventDefault();
     if (!selected) return;
@@ -205,6 +246,7 @@ export default function NearbyVehicleMap() {
     try {
       const { data: auth, error: authError } = await supabase.auth.getUser();
       if (authError || !auth?.user) throw new Error('रिक्वेस्ट पठाउन पहिले लगइन गर्नुहोस्।');
+      await requireApprovedKyc(auth.user.id);
       if (auth.user.id === selected.user_id) throw new Error('आफ्नै गाडीमा बुकिङ रिक्वेस्ट पठाउन मिल्दैन।');
       if (!requesterName.trim()) throw new Error('आफ्नो नाम वा कम्पनीको नाम लेख्नुहोस्।');
       const { error } = await supabase.from('vehicle_booking_requests').insert({
@@ -223,6 +265,13 @@ export default function NearbyVehicleMap() {
         status: 'pending'
       });
       if (error) throw error;
+      await supabase.from('load_notifications').insert({
+        user_id: selected.user_id,
+        type: 'vehicle_booking_request',
+        title_key: 'नयाँ बुकिङ अनुरोध',
+        body_key: 'तपाईंको लोडमा नयाँ बुकिङ अनुरोध आएको छ।',
+        booking_id: null
+      });
       setNotice('बुकिङ रिक्वेस्ट गाडीवालालाई पठाइयो। स्वीकार नभएसम्म बुकिङ पक्का भएको मानिँदैन।');
       setSelected(null);
       setPickup(''); setDestination(''); setCargo(''); setFare('');
@@ -239,6 +288,7 @@ export default function NearbyVehicleMap() {
       if (!auth?.user || auth.user.id !== request.vehicle_owner_id) {
         throw new Error('यो रिक्वेस्टको निर्णय सम्बन्धित गाडीवालाले मात्र गर्न सक्छ।');
       }
+      await requireApprovedKyc(auth.user.id);
       if (decision === 'accepted') {
         const { data: existing, error: checkError } = await supabase
           .from('vehicle_booking_requests')
@@ -254,6 +304,14 @@ export default function NearbyVehicleMap() {
         .eq('id', request.id)
         .eq('status', 'pending');
       if (error) throw error;
+      await supabase.from('load_notifications').insert({
+        user_id: request.requester_id,
+        type: decision === 'accepted' ? 'vehicle_booking_accepted' : 'vehicle_booking_rejected',
+        title_key: decision === 'accepted' ? 'बुकिङ स्वीकार भयो' : 'बुकिङ अस्वीकार भयो',
+        body_key: decision === 'accepted' ? 'तपाईंको गाडी बुकिङ अनुरोध स्वीकार गरिएको छ।' : 'तपाईंको गाडी बुकिङ अनुरोध अस्वीकार गरिएको छ।',
+        booking_id: null
+      });
+      setRequests(old => old.filter(r => r.id !== request.id));
       if (decision === 'accepted') {
         await supabase.from('vehicle_locations')
           .update({ vehicle_status: 'booked', is_available: false, updated_at: new Date().toISOString() })
@@ -308,8 +366,8 @@ export default function NearbyVehicleMap() {
       {canShare && <div style={{marginTop:18}}>
         <h4>📥 तपाईंको गाडीमा आएका रिक्वेस्ट</h4>
         <button type="button" onClick={loadRequests} style={{padding:8,marginBottom:8}}>रिक्वेस्ट रिफ्रेस गर्नुहोस्</button>
-        {requests.length===0 && <p>अहिलेसम्म रिक्वेस्ट छैन।</p>}
-        {requests.map(r=><div key={r.id} style={{border:'1px solid #ddd',borderRadius:10,padding:12,marginBottom:10,overflowWrap:'anywhere'}}>
+        {requests.filter(r => r.status === 'pending' && Date.now() - new Date(r.created_at).getTime() < 15000).length===0 && <p>पछिल्लो १५ सेकेन्डमा नयाँ रिक्वेस्ट छैन।</p>}
+        {requests.filter(r => r.status === 'pending' && Date.now() - new Date(r.created_at).getTime() < 15000).map(r=><div key={r.id} style={{border:'1px solid #ddd',borderRadius:10,padding:12,marginBottom:10,overflowWrap:'anywhere'}}>
           <b>{r.requester_name || 'नाम उपलब्ध छैन'} · {r.requester_type || 'प्रकार उपलब्ध छैन'}</b>
           {r.requester_company && <p>कम्पनी: {r.requester_company}</p>}
           {r.requester_phone && <p>फोन: {r.requester_phone}</p>}
