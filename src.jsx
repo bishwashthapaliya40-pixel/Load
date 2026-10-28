@@ -532,15 +532,23 @@ function App() {
           setAuthMessage('Google Login समस्या: ' + oauthError);
           return;
         }
-        if (!code) {
-          setAuthMessage('Google Login समस्या: callback मा code आएन। URL: '
-            + callbackUrl.protocol + '//' + callbackUrl.host + callbackUrl.pathname
-            + ' | query keys: ' + [...callbackUrl.searchParams.keys()].join(',')
-            + ' | hash keys: ' + [...hashParams.keys()].join(','));
-          return;
+        let authResult;
+        if (code) {
+          authResult = await supabase.auth.exchangeCodeForSession(code);
+        } else {
+          const access_token = hashParams.get('access_token');
+          const refresh_token = hashParams.get('refresh_token');
+          if (!access_token || !refresh_token) {
+            setAuthMessage('Google Login समस्या: callback मा आवश्यक session जानकारी आएन।');
+            return;
+          }
+          authResult = await supabase.auth.setSession({ access_token, refresh_token });
         }
-        const { error } = await supabase.auth.exchangeCodeForSession(code);
-        if (error) setAuthMessage('Google Login समस्या: ' + error.message);
+        if (authResult.error) {
+          setAuthMessage('Google Login समस्या: ' + authResult.error.message);
+        } else {
+          setAuthMessage('');
+        }
       } catch (error) {
         setAuthMessage('Google Login समस्या: ' + error.message);
       }
