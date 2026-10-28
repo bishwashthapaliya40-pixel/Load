@@ -522,10 +522,21 @@ function App() {
       try {
         await Browser.close();
         const callbackUrl = new URL(url);
+        const hashParams = new URLSearchParams(callbackUrl.hash.replace(/^#/, ''));
         const code = callbackUrl.searchParams.get('code');
-        if (!code) {
-          const oauthError = callbackUrl.searchParams.get('error_description') || callbackUrl.searchParams.get('error') || 'Google बाट authorization code आएन';
+        const oauthError = callbackUrl.searchParams.get('error_description')
+          || callbackUrl.searchParams.get('error')
+          || hashParams.get('error_description')
+          || hashParams.get('error');
+        if (oauthError) {
           setAuthMessage('Google Login समस्या: ' + oauthError);
+          return;
+        }
+        if (!code) {
+          setAuthMessage('Google Login समस्या: callback मा code आएन। URL: '
+            + callbackUrl.protocol + '//' + callbackUrl.host + callbackUrl.pathname
+            + ' | query keys: ' + [...callbackUrl.searchParams.keys()].join(',')
+            + ' | hash keys: ' + [...hashParams.keys()].join(','));
           return;
         }
         const { error } = await supabase.auth.exchangeCodeForSession(code);
