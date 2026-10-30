@@ -10,6 +10,37 @@ import React, { useState, useEffect } from 'react';
 import { createRoot } from 'react-dom/client';
 
 
+async function getCurrentGpsPosition() {
+  if (Capacitor.isNativePlatform()) {
+    let permission = await Geolocation.checkPermissions();
+
+    if (permission.location !== 'granted' && permission.coarseLocation !== 'granted') {
+      permission = await Geolocation.requestPermissions({ permissions: ['location'] });
+    }
+
+    if (permission.location !== 'granted' && permission.coarseLocation !== 'granted') {
+      throw new Error('GPS अनुमति अस्वीकार भयो। मोबाइल Settings बाट Location अनुमति दिनुहोस्।');
+    }
+
+    return await Geolocation.getCurrentPosition({
+      enableHighAccuracy: true,
+      timeout: 20000
+    });
+  }
+
+  if (!navigator.geolocation) {
+    throw new Error('यो मोबाइलमा GPS उपलब्ध छैन।');
+  }
+
+  return await new Promise((resolve, reject) => {
+    navigator.geolocation.getCurrentPosition(resolve, reject, {
+      enableHighAccuracy: true,
+      timeout: 20000
+    });
+  });
+}
+
+
 function SupportInbox({ supabase, uid, refresh, setMessage }) {
   const [items, setItems] = useState([]);
   const [replies, setReplies] = useState({});
@@ -2368,23 +2399,18 @@ function App() {
         <h3>{tr('नयाँ लोडको विवरण')}</h3>
         {field(tr('लोड दिने व्यक्ति/कम्पनी'), 'sender')}
         {field(tr('सामान कहाँबाट उठाउने?'), 'origin')}
-        <button type="button" className="primary" onClick={() => {
-          if (!navigator.geolocation) {
-            setMessage('यो मोबाइलमा GPS उपलब्ध छैन।');
-            return;
+        <button type="button" className="primary" onClick={async () => {
+          try {
+            const pos = await getCurrentGpsPosition();
+            setForm(prev => ({
+              ...prev,
+              origin_latitude: pos.coords.latitude,
+              origin_longitude: pos.coords.longitude
+            }));
+            setMessage('पिकअप GPS स्थान प्राप्त भयो।');
+          } catch (err) {
+            setMessage('GPS स्थान लिन सकिएन: ' + (err.message || err));
           }
-          navigator.geolocation.getCurrentPosition(
-            pos => {
-              setForm(prev => ({
-                ...prev,
-                origin_latitude: pos.coords.latitude,
-                origin_longitude: pos.coords.longitude
-              }));
-              setMessage('पिकअप GPS स्थान प्राप्त भयो।');
-            },
-            err => setMessage('GPS स्थान लिन सकिएन। मोबाइलको Location अनुमति खोल्नुहोस्।'),
-            { enableHighAccuracy: true, timeout: 15000 }
-          );
         }}>📍 पिकअप GPS स्थान लिनुहोस्</button>
         {form.origin_latitude != null && <small>GPS स्थान सुरक्षित गर्न तयार छ ✓</small>}
         {field(tr('सामान कहाँ पुर्‍याउने?'), 'destination')}
@@ -2405,24 +2431,19 @@ function App() {
           <div className="field"><label>लोड क्षमता (स्वीकृत KYC)</label><input value={providerVehicle.capacity ? providerVehicle.capacity + ' ' + (providerVehicle.unit || 'ton') : ''} readOnly /></div>
           <div className="field"><label>सम्पर्क नम्बर</label><input type="tel" value={form.provider_phone ?? providerVehicle.phone ?? ''} onChange={e => setForm(prev => ({...prev, provider_phone:e.target.value}))} required /></div>
           <div className="field"><label>गाडीको हालको स्थान</label><input value={form.provider_origin || ''} onChange={e => setForm(prev => ({...prev, provider_origin:e.target.value}))} required /></div>
-          <button type="button" className="primary" onClick={() => {
-            if (!navigator.geolocation) {
-              setMessage('यो मोबाइलमा GPS उपलब्ध छैन।');
-              return;
+          <button type="button" className="primary" onClick={async () => {
+            try {
+              const pos = await getCurrentGpsPosition();
+              setForm(prev => ({
+                ...prev,
+                provider_origin_latitude: pos.coords.latitude,
+                provider_origin_longitude: pos.coords.longitude,
+                provider_origin: prev.provider_origin || 'GPS स्थान प्राप्त भयो'
+              }));
+              setMessage('गाडीको GPS स्थान प्राप्त भयो।');
+            } catch (err) {
+              setMessage('GPS स्थान लिन सकिएन: ' + (err.message || err));
             }
-            navigator.geolocation.getCurrentPosition(
-              pos => {
-                setForm(prev => ({
-                  ...prev,
-                  provider_origin_latitude: pos.coords.latitude,
-                  provider_origin_longitude: pos.coords.longitude,
-                  provider_origin: prev.provider_origin || 'GPS स्थान प्राप्त भयो'
-                }));
-                setMessage('गाडीको GPS स्थान प्राप्त भयो।');
-              },
-              () => setMessage('GPS स्थान लिन सकिएन। मोबाइलको Location अनुमति खोल्नुहोस्।'),
-              {enableHighAccuracy:true, timeout:15000}
-            );
           }}>📍 हालको GPS स्थान लिनुहोस्</button>
           {form.provider_origin_latitude != null && <small>GPS स्थान प्राप्त भयो ✓</small>}
           <div className="field"><label>गाडी जान सक्ने गन्तव्य</label><input value={form.provider_destination || ''} onChange={e => setForm(prev => ({...prev, provider_destination:e.target.value}))} required /></div>
@@ -2771,6 +2792,14 @@ function App() {
           const uid = currentUserId;
           return <>
             <h3>Help Center / सहायता केन्द्र</h3>
+            <div style={{display:'grid',gap:10,marginBottom:16}}>
+              <a href="https://m.me/61595956204923" target="_blank" rel="noopener noreferrer" style={{display:'block',padding:14,borderRadius:10,background:'#1877F2',color:'white',textAlign:'center',textDecoration:'none',fontWeight:'bold'}}>
+                f Facebook Messenger
+              </a>
+              <a href="https://www.facebook.com/profile.php?id=61595956204923" target="_blank" rel="noopener noreferrer" style={{display:'block',padding:14,borderRadius:10,background:'#102b46',color:'white',textAlign:'center',textDecoration:'none',fontWeight:'bold'}}>
+                Facebook Page खोल्नुहोस्
+              </a>
+            </div>
               <form onSubmit={async e => {
                 e.preventDefault();
                 const f = e.currentTarget;
