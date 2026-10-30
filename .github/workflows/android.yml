@@ -1,4 +1,4 @@
-name: Build Load Android APK
+name: Build LoadMitra APK and AAB
 
 on:
   workflow_dispatch:
@@ -36,12 +36,29 @@ jobs:
       - name: Sync Android
         run: npx cap sync android
 
-      - name: Build APK
-        working-directory: android
-        run: chmod +x gradlew && ./gradlew assembleDebug
+      - name: Prepare release signing
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          mkdir -p android/keystore
+          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > android/keystore/loadmitra-release.jks
+          printf 'storeFile=../keystore/loadmitra-release.jks\nstorePassword=%s\nkeyAlias=%s\nkeyPassword=%s\n' "$KEYSTORE_PASSWORD" "$KEY_ALIAS" "$KEY_PASSWORD" > android/key.properties
 
-      - name: Save APK
+      - name: Build APK and AAB
+        working-directory: android
+        run: chmod +x gradlew && ./gradlew assembleDebug bundleRelease
+
+      - name: Save Debug APK
         uses: actions/upload-artifact@v4
         with:
-          name: Load-Android-APK
+          name: LoadMitra-Android-APK
           path: android/app/build/outputs/apk/debug/*.apk
+
+      - name: Save Signed Release AAB
+        uses: actions/upload-artifact@v4
+        with:
+          name: LoadMitra-Release-AAB
+          path: android/app/build/outputs/bundle/release/*.aab
