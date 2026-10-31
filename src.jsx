@@ -863,7 +863,104 @@ function App() {
 'तपाईंको पहिचान प्रमाणीकरण अस्वीकृत भयो। विवरण जाँच गर्नुहोस्।':'您的身份验证未通过，请检查相关信息。'
       }
     };
-  const tr = (text) => featureTranslations[language]?.[text] || translations[language]?.[text] || text;
+  const kycTranslations = {
+  'KYC प्रमाणिकरण': ['KYC Verification','KYC सत्यापन','身份验证'],
+  'पूरा नाम': ['Full Name','पूरा नाम','全名'],
+  'मोबाइल नम्बर': ['Mobile Number','मोबाइल नंबर','手机号码'],
+  'प्रदेशको नाम': ['Province Name','प्रदेश का नाम','省份名称'],
+  'जिल्लाको नाम': ['District Name','जिले का नाम','县名称'],
+  'महानगरपालिका / उपमहानगरपालिका / नगरपालिका / गाउँपालिका': ['Metropolitan City / Sub-Metropolitan City / Municipality / Rural Municipality','महानगरपालिका / उपमहानगरपालिका / नगरपालिका / गाउँपालिका','大都会 / 次大都会 / 市镇 / 农村市镇'],
+  'टोलको नाम': ['Tole / Area Name','टोला / क्षेत्र का नाम','街区名称'],
+  'पसलको नाम': ['Shop Name','दुकान का नाम','店铺名称'],
+  'व्यवसायको प्रकार': ['Business Type','व्यवसाय का प्रकार','业务类型'],
+
+  'प्रदेश': ['Province','प्रदेश','省'],
+  'जिल्ला': ['District','जिला','县'],
+  'स्थानीय तह': ['Local Level','स्थानीय तह','地方行政级别'],
+  'वडा नम्बर': ['Ward Number','वार्ड नंबर',' ward编号'],
+  'टोल': ['Tole / Area','टोला / क्षेत्र','街区 / 区域'],
+  'पासपोर्ट साइजको आफ्नो फोटो *': ['Passport-size Photo *','पासपोर्ट साइज फोटो *','护照尺寸照片 *'],
+  'कागजातको प्रकार': ['Document Type','दस्तावेज़ का प्रकार','证件类型'],
+  'नागरिकता': ['Citizenship','नागरिकता','公民身份证'],
+  'राहदानी': ['Passport','पासपोर्ट','护照'],
+  'राष्ट्रिय परिचयपत्र': ['National ID','राष्ट्रीय पहचान पत्र','国家身份证'],
+  'ड्राइभिङ लाइसेन्स': ['Driving Licence','ड्राइविंग लाइसेंस','驾驶证'],
+  'कागजात नम्बर': ['Document Number','दस्तावेज़ संख्या','证件号码'],
+  'कागजातको अगाडिको फोटो': ['Front Side of Document','दस्तावेज़ का सामने का फोटो','证件正面照片'],
+  'कागजातको पछाडिको फोटो': ['Back Side of Document','दस्तावेज़ का पीछे का फोटो','证件背面照片'],
+  'भूमिका / व्यवसायको प्रकार': ['Role / Business Type','भूमिका / व्यवसाय का प्रकार','角色 / 业务类型'],
+  'आफ्नो प्रकार छान्नुहोस्': ['Select your type','अपना प्रकार चुनें','选择您的类型'],
+  'व्यक्तिगत सामान ढुवानी विवरण': ['Personal Goods Transport Details','व्यक्तिगत सामान परिवहन विवरण','个人货物运输信息'],
+  'ढुवानीको प्रयोजन': ['Purpose of Transport','परिवहन का उद्देश्य','运输用途'],
+  'सामानको प्रकार': ['Type of Goods','सामान का प्रकार','货物类型'],
+  'थप जानकारी': ['Additional Information','अतिरिक्त जानकारी','补充信息'],
+  'ड्राइभिङ लाइसेन्स KYC': ['Driving Licence KYC','驾驶证 KYC','驾驶证身份验证'],
+  'लाइसेन्स नम्बर': ['Licence Number','लाइसेंस नंबर','驾驶证号码'],
+  'लाइसेन्सवालाको पूरा नाम': ['Licence Holder Full Name','लाइसेंस धारक का पूरा नाम','驾驶证持有人全名'],
+  'लाइसेन्सको वर्ग': ['Licence Category','लाइसेंस श्रेणी','驾驶证类别'],
+  'लाइसेन्स जारी/बनाएको मिति': ['Licence Issue Date','लाइसेंस जारी करने की तारीख','驾驶证签发日期'],
+  'लाइसेन्स म्याद सकिने मिति': ['Licence Expiry Date','लाइसेंस समाप्ति तिथि','驾驶证到期日期'],
+  'गाडी तथा ब्लुबुक KYC': ['Vehicle and Bluebook KYC','车辆及登记证 KYC','车辆及登记簿身份验证'],
+  'गाडीको प्रकार': ['Vehicle Type','वाहन का प्रकार','车辆类型'],
+  'गाडी छान्नुहोस्': ['Select Vehicle','वाहन चुनें','选择车辆'],
+  'गाडी नम्बर': ['Vehicle Number','वाहन नंबर','车牌号码'],
+  'ब्लुबुक नम्बर': ['Bluebook Number','蓝皮书号码','登记簿号码'],
+  'ब्लुबुकमा लेखिएको गाडीधनीको पूरा नाम': ['Registered Owner Full Name','登记车主全名','登记车主姓名'],
+  'ब्लुबुक जारी भएको मिति': ['Bluebook Issue Date','蓝皮书签发日期','登记簿签发日期'],
+  'ब्लुबुक नवीकरण गरेको मिति': ['Bluebook Renewal Date','蓝皮书续期日期','登记簿续期日期'],
+  'ब्लुबुक नवीकरणको म्याद सकिने मिति': ['Bluebook Expiry Date','蓝皮书到期日期','登记簿到期日期'],
+  'गाडीको लोड क्षमता (अङ्क)': ['Vehicle Load Capacity (Number)','车辆载重能力（数字）','车辆载重能力（数字）'],
+  'क्षमता एकाइ': ['Capacity Unit','容量单位','容量单位'],
+  'केजी': ['Kg','किलोग्राम','公斤'],
+  'टन': ['Ton','टन','吨'],
+  'गाडीको लम्बाइ (फिट)': ['Vehicle Length (Feet)','车辆长度（英尺）','车辆长度（英尺）'],
+  'गाडीको इन्स्योरेन्स KYC': ['Vehicle Insurance KYC','车辆保险 KYC','车辆保险身份验证'],
+  'बीमा कम्पनीको नाम': ['Insurance Company Name','बीमा कंपनी का नाम','保险公司名称'],
+  'बीमा पोलिसी नम्बर': ['Insurance Policy Number','बीमा पॉलिसी नंबर','保险单号'],
+  'बीमा गरेको मिति': ['Insurance Start Date','保险开始日期','保险起始日期'],
+  'बीमा सकिने मिति': ['Insurance Expiry Date','保险到期日期','保险到期日期'],
+  'यातायात कम्पनी KYC': ['Transport Company KYC','运输公司 KYC','运输公司身份验证'],
+  'कम्पनीको नाम': ['Company Name','公司名称','公司名称'],
+  'कम्पनी दर्ता नम्बर': ['Company Registration Number','公司注册号码','公司注册号码'],
+  'कम्पनी दर्ता भएको मिति': ['Company Registration Date','公司注册日期','公司注册日期'],
+  'दर्ता प्रमाणपत्रको म्याद सकिने मिति': ['Registration Certificate Expiry Date','注册证书到期日期','注册证书到期日期'],
+  'तपाईंको कागजात निजी भण्डारणमा राखिनेछ।': ['Your documents will be stored privately.','आपके दस्तावेज़ निजी रूप से सुरक्षित रखे जाएंगे।','您的文件将被私密保存。'],
+  'KYC सुरक्षित गर्नुहोस्': ['Save KYC','KYC सुरक्षित करें','保存身份验证信息'],
+
+  'व्यक्तिगत सामान ढुवानी विवरण': ['Personal Goods Transport Details', 'व्यक्तिगत सामान परिवहन विवरण', '个人货物运输信息'],
+  'ड्राइभिङ लाइसेन्स KYC': ['Driving Licence KYC', 'ड्राइविंग लाइसेंस KYC', '驾驶证身份验证'],
+  'गाडी तथा ब्लुबुक KYC': ['Vehicle and Bluebook KYC', 'वाहन और ब्लूबुक KYC', '车辆及登记簿身份验证'],
+  'गाडीको इन्स्योरेन्स KYC': ['Vehicle Insurance KYC', 'वाहन बीमा KYC', '车辆保险身份验证'],
+  'यातायात कम्पनी KYC': ['Transport Company KYC', 'परिवहन कंपनी KYC', '运输公司身份验证'],
+  'व्यवसायको ठेगाना': ['Business Address','व्यवसाय का पता','营业地址'],
+  'प्रतिनिधिको पूरा नाम': ['Representative Full Name','प्रतिनिधि का पूरा नाम','代表人全名'],
+  'प्रतिनिधिको पद': ['Representative Position','प्रतिनिधि का पद','代表人职位'],
+  'ठेकेदार तथा निर्माण कम्पनी विवरण': ['Contractor and Construction Company Details','ठेकेदार और निर्माण कंपनी विवरण','承包商及建筑公司信息'],
+  'अनलाइन पसल तथा वितरक विवरण': ['Online Shop and Distributor Details','ऑनलाइन दुकान और वितरक विवरण','网店及分销商信息'],
+  'अन्य व्यवसाय तथा संस्था विवरण': ['Other Business and Organization Details','其他 व्यवसाय及机构信息','其他企业及机构信息'],
+  'पसल तथा व्यापारी विवरण': ['Shop and Trader Details', 'दुकान और व्यापारी विवरण', '商店及商户信息'],
+  'फ्याक्ट्री तथा उद्योग विवरण': ['Factory and Industry Details', 'कारखाना और उद्योग विवरण', '工厂及工业信息'],
+  'ठेकेदार तथा निर्माण कम्पनी विवरण': ['Contractor and Construction Company Details', 'ठेकेदार और निर्माण कंपनी विवरण', '承包商及建筑公司信息'],
+  'अनलाइन पसल तथा वितरक विवरण': ['Online Shop and Distributor Details', 'ऑनलाइन दुकान और वितरक विवरण', '网店及经销商信息'],
+  'अन्य व्यवसाय तथा संस्था विवरण': ['Other Business and Organization Details', '其他企业及机构信息', '其他企业及机构信息'],
+  'साइकल': ['Bicycle', 'साइकिल', '自行车'],
+  'मोटरसाइकल': ['Motorcycle', 'मोटरसाइकिल', '摩托车'],
+  'तीनपाङ्ग्रे कार्गो': ['Three-wheel Cargo', 'तीन पहिया मालवाहक', '三轮货运车'],
+  'पिकअप': ['Pickup', 'पिकअप', '皮卡车'],
+  'मिनी ट्रक': ['Mini Truck', 'मिनी ट्रक', '小型卡车'],
+  'कार्गो भ्यान': ['Cargo Van', 'मालवाहक वैन', '货运面包车'],
+  '६ चक्के ट्रक': ['6-wheel Truck', '6 पहिया ट्रक', '六轮卡车'],
+  '८ चक्के ट्रक': ['8-wheel Truck', '8 पहिया ट्रक', '八轮卡车'],
+  '१० चक्के ट्रक': ['10-wheel Truck', '10 पहिया ट्रक', '十轮卡车'],
+  '१२ चक्के ट्रक': ['12-wheel Truck', '12 पहिया ट्रक', '十二轮卡车'],
+  '१४ चक्के ट्रक': ['14-wheel Truck', '14 पहिया ट्रक', '十四轮卡车'],
+  'अन्य व्यावसायिक गाडी': ['Other Commercial Vehicle', 'अन्य व्यावसायिक वाहन', '其他商用车辆'],
+};
+const kycTr = (text) => {
+  const index = {'English':0,'हिन्दी':1,'中文':2}[language];
+  return index === undefined ? text : (kycTranslations[text]?.[index] || text);
+};
+const tr = (text) => featureTranslations[language]?.[text] || translations[language]?.[text] || text;
 
   const floatingBack = {
     position: 'fixed', right: 18, bottom: 18, zIndex: 9999,
@@ -2113,52 +2210,52 @@ function App() {
         <button type="submit">प्रोफाइल सुरक्षित गर्नुहोस्</button>
       </form>}
       {page === 'kyc' && <form onSubmit={saveKyc} className="panel">
-        <h3>KYC प्रमाणिकरण</h3>
+        <h3>{kycTr('KYC प्रमाणिकरण')}</h3>
         {message && <p style={{color:'#b91c1c',background:'#fff1f2',padding:12,borderRadius:8}}>{message}</p>}
                 {accountKycStatus === 'अस्वीकृत (Rejected)' && accountKycNote &&
                   <p style={{color:'#b91c1c',background:'#fff1f2',padding:12,borderRadius:8}}>Admin को कारण: {accountKycNote}</p>}
-        <label className="field">पूरा नाम
+        <label className="field">{kycTr('पूरा नाम')}
           <input required value={form.full_name || ''} onChange={e => setForm({...form, full_name:e.target.value})}/>
         </label>
-        <label className="field">मोबाइल नम्बर
+        <label className="field">{kycTr('मोबाइल नम्बर')}
           <input required type="tel" value={form.phone || ''} onChange={e => setForm({...form, phone:e.target.value})}/>
         </label>
-        <label className="field">प्रदेश
-          <input required value={form.address_province || ''} onChange={e => setForm({...form, address_province:e.target.value})} placeholder="प्रदेशको नाम"/>
+        <label className="field">{kycTr('प्रदेश')}
+          <input required value={form.address_province || ''} onChange={e => setForm({...form, address_province:e.target.value})} placeholder={kycTr("प्रदेशको नाम")}/>
         </label>
-        <label className="field">जिल्ला
-          <input required value={form.address_district || ''} onChange={e => setForm({...form, address_district:e.target.value})} placeholder="जिल्लाको नाम"/>
+        <label className="field">{kycTr('जिल्ला')}
+          <input required value={form.address_district || ''} onChange={e => setForm({...form, address_district:e.target.value})} placeholder={kycTr("जिल्लाको नाम")}/>
         </label>
-        <label className="field">स्थानीय तह
-          <input required value={form.address_local_level || ''} onChange={e => setForm({...form, address_local_level:e.target.value})} placeholder="महानगरपालिका / उपमहानगरपालिका / नगरपालिका / गाउँपालिका"/>
+        <label className="field">{kycTr('स्थानीय तह')}
+          <input required value={form.address_local_level || ''} onChange={e => setForm({...form, address_local_level:e.target.value})} placeholder={kycTr("महानगरपालिका / उपमहानगरपालिका / नगरपालिका / गाउँपालिका")}/>
         </label>
-        <label className="field">वडा नम्बर
+        <label className="field">{kycTr('वडा नम्बर')}
           <input required type="number" min="1" value={form.address_ward || ''} onChange={e => setForm({...form, address_ward:e.target.value})}/>
         </label>
-        <label className="field">टोल
-          <input required value={form.address_tole || ''} onChange={e => setForm({...form, address_tole:e.target.value})} placeholder="टोलको नाम"/>
+        <label className="field">{kycTr('टोल')}
+          <input required value={form.address_tole || ''} onChange={e => setForm({...form, address_tole:e.target.value})} placeholder={kycTr("टोलको नाम")}/>
         </label>
-        <label className="field">पासपोर्ट साइजको आफ्नो फोटो *
+        <label className="field">{kycTr('पासपोर्ट साइजको आफ्नो फोटो *')}
           <input required type="file" accept="image/*" capture="user" onChange={e => setKycPhotoFile(e.target.files?.[0] || null)}/>
         </label>
-        <label className="field">कागजातको प्रकार
+        <label className="field">{kycTr('कागजातको प्रकार')}
           <select required value={form.document_type || 'citizenship'} onChange={e => setForm({...form, document_type:e.target.value})}>
-            <option value="citizenship">नागरिकता</option>
-            <option value="passport">राहदानी</option>
-            <option value="national_id">राष्ट्रिय परिचयपत्र</option>
-            <option value="license">ड्राइभिङ लाइसेन्स</option>
+            <option value="citizenship">{kycTr('नागरिकता')}</option>
+            <option value="passport">{kycTr('राहदानी')}</option>
+            <option value="national_id">{kycTr('राष्ट्रिय परिचयपत्र')}</option>
+            <option value="license">{kycTr('ड्राइभिङ लाइसेन्स')}</option>
           </select>
         </label>
-        <label className="field">कागजात नम्बर
+        <label className="field">{kycTr('कागजात नम्बर')}
           <input required value={form.document_number || ''} onChange={e => setForm({...form, document_number:e.target.value})}/>
         </label>
-        <label className="field">कागजातको अगाडिको फोटो
+        <label className="field">{kycTr('कागजातको अगाडिको फोटो')}
           <input required type="file" accept="image/*" capture="environment" onChange={e => setKycFrontFile(e.target.files?.[0] || null)}/>
         </label>
-        <label className="field">कागजातको पछाडिको फोटो
+        <label className="field">{kycTr('कागजातको पछाडिको फोटो')}
           <input required type="file" accept="image/*" capture="environment" onChange={e => setKycBackFile(e.target.files?.[0] || null)}/>
         </label>
-        <label className="field">भूमिका / व्यवसायको प्रकार
+        <label className="field">{kycTr('भूमिका / व्यवसायको प्रकार')}
           <select required value={roleType}
             onChange={e => {
               const category = localStorage.getItem('load_role_category') || '';
@@ -2172,7 +2269,7 @@ function App() {
                 setRole(selected[0]);
               }
             }}>
-            <option value="">आफ्नो प्रकार छान्नुहोस्</option>
+            <option value="">{kycTr('आफ्नो प्रकार छान्नुहोस्')}</option>
             {(roleGroups[language] || roleGroups['नेपाली'])
               .find(g => g.key === (localStorage.getItem('load_role_category') || ''))
               ?.options.map(([key, name], i) => (
@@ -2196,27 +2293,27 @@ function App() {
         const isBusinessSeeker = isShop || isFactory || isContractor || isOnlineShop || isOtherBusiness;
         const showVehicle = isDriver || isOwner || isTransport;
         const field = (label, key, type='text', required=true) => (
-          <label className="field" key={key}>{label}
+          <label className="field" key={key}>{kycTr(label)}
             <input type={type} required={required}
               value={form[key] || ''}
               onChange={e => setForm(old => ({...old, [key]:e.target.value}))}/>
           </label>
         );
         const fileField = (label, key) => (
-          <label className="field" key={key}>{label}
+          <label className="field" key={key}>{kycTr(label)}
             <input type="file" required accept="image/*,.pdf" capture="environment"
               onChange={e => setKycExtraDocs(old => ({...old, [key]:e.target.files?.[0] || null}))}/>
           </label>
         );
         return <>
           {isPersonal && <section className="panel">
-            <h4>व्यक्तिगत सामान ढुवानी विवरण</h4>
+            <h4>{kycTr('व्यक्तिगत सामान ढुवानी विवरण')}</h4>
             {field('ढुवानीको प्रयोजन','personal_transport_purpose')}
             {field('सामानको प्रकार','personal_goods_type')}
             {field('थप जानकारी','personal_transport_notes','text',false)}
           </section>}
           {isBusinessSeeker && <section className="panel">
-            <h4>{isShop ? 'पसल तथा व्यापारी विवरण' : isFactory ? 'फ्याक्ट्री तथा उद्योग विवरण' : isContractor ? 'ठेकेदार तथा निर्माण कम्पनी विवरण' : isOnlineShop ? 'अनलाइन पसल तथा वितरक विवरण' : 'अन्य व्यवसाय तथा संस्था विवरण'}</h4>
+            <h4>{kycTr(isShop ? 'पसल तथा व्यापारी विवरण' : isFactory ? 'फ्याक्ट्री तथा उद्योग विवरण' : isContractor ? 'ठेकेदार तथा निर्माण कम्पनी विवरण' : isOnlineShop ? 'अनलाइन पसल तथा वितरक विवरण' : 'अन्य व्यवसाय तथा संस्था विवरण')}</h4>
             {field(isShop ? 'पसलको नाम' : isFactory ? 'फ्याक्ट्री / उद्योगको नाम' : isContractor ? 'कम्पनी / ठेकेदारको नाम' : isOnlineShop ? 'अनलाइन पसल / वितरकको नाम' : 'व्यवसाय / संस्थाको नाम','business_name')}
             {field('व्यवसायको प्रकार','business_type')}
             {field('व्यवसायको ठेगाना','business_address')}
@@ -2229,7 +2326,7 @@ function App() {
             {field('ढुवानी गरिने सामानको प्रकार','business_goods_type')}
           </section>}
           {(isDriver || isOwner) && <section className="panel">
-            <h4>ड्राइभिङ लाइसेन्स KYC</h4>
+            <h4>{kycTr('ड्राइभिङ लाइसेन्स KYC')}</h4>
             {field('लाइसेन्स नम्बर','driver_license_number')}
             {field('लाइसेन्सवालाको पूरा नाम','driver_license_name')}
             {field('लाइसेन्सको वर्ग','driver_license_class')}
@@ -2240,16 +2337,16 @@ function App() {
           </section>}
 
           {showVehicle && <section className="panel">
-            <h4>गाडी तथा ब्लुबुक KYC</h4>
-            <label className="field">गाडीको प्रकार
+            <h4>{kycTr('गाडी तथा ब्लुबुक KYC')}</h4>
+            <label className="field">{kycTr("गाडीको प्रकार")}
               <select required value={form.vehicle_type || ''} onChange={e => setForm(old => ({...old, vehicle_type:e.target.value}))}>
-                <option value="">गाडी छान्नुहोस्</option>
-                <option>साइकल</option><option>मोटरसाइकल</option>
-                <option>तीनपाङ्ग्रे कार्गो</option><option>पिकअप</option>
-                <option>मिनी ट्रक</option><option>कार्गो भ्यान</option>
-                <option>६ चक्के ट्रक</option><option>८ चक्के ट्रक</option>
-                <option>१० चक्के ट्रक</option><option>१२ चक्के ट्रक</option>
-                <option>१४ चक्के ट्रक</option><option>अन्य व्यावसायिक गाडी</option>
+                <option value="">{kycTr('गाडी छान्नुहोस्')}</option>
+                <option value="साइकल">{kycTr('साइकल')}</option><option value="मोटरसाइकल">{kycTr('मोटरसाइकल')}</option>
+                <option value="तीनपाङ्ग्रे कार्गो">{kycTr('तीनपाङ्ग्रे कार्गो')}</option><option value="पिकअप">{kycTr('पिकअप')}</option>
+                <option value="मिनी ट्रक">{kycTr('मिनी ट्रक')}</option><option value="कार्गो भ्यान">{kycTr('कार्गो भ्यान')}</option>
+                <option value="६ चक्के ट्रक">{kycTr('६ चक्के ट्रक')}</option><option value="८ चक्के ट्रक">{kycTr('८ चक्के ट्रक')}</option>
+                <option value="१० चक्के ट्रक">{kycTr('१० चक्के ट्रक')}</option><option value="१२ चक्के ट्रक">{kycTr('१२ चक्के ट्रक')}</option>
+                <option value="१४ चक्के ट्रक">{kycTr('१४ चक्के ट्रक')}</option><option value="अन्य व्यावसायिक गाडी">{kycTr('अन्य व्यावसायिक गाडी')}</option>
               </select>
             </label>
             {field('गाडी नम्बर','vehicle_number')}
@@ -2259,9 +2356,9 @@ function App() {
             {field('ब्लुबुक नवीकरण गरेको मिति','bluebook_renewal_date','date')}
             {field('ब्लुबुक नवीकरणको म्याद सकिने मिति','bluebook_expiry_date','date')}
             {field('गाडीको लोड क्षमता (अङ्क)','load_capacity','number')}
-            <label className="field">क्षमता एकाइ
+            <label className="field">{kycTr("क्षमता एकाइ")}
               <select required value={form.capacity_unit || 'ton'} onChange={e => setForm(old => ({...old, capacity_unit:e.target.value}))}>
-                <option value="kg">केजी</option><option value="ton">टन</option>
+                <option value="kg">{kycTr('केजी')}</option><option value="ton">{kycTr('टन')}</option>
               </select>
             </label>
             {field('गाडीको लम्बाइ (फिट)','vehicle_length','number',false)}
@@ -2270,7 +2367,7 @@ function App() {
           </section>}
 
           {showVehicle && <section className="panel">
-            <h4>गाडीको इन्स्योरेन्स KYC</h4>
+            <h4>{kycTr('गाडीको इन्स्योरेन्स KYC')}</h4>
             {field('बीमा कम्पनीको नाम','insurance_company')}
             {field('बीमा पोलिसी नम्बर','insurance_policy_number')}
             {field('बीमा गरेको मिति','insurance_start_date','date')}
@@ -2280,7 +2377,7 @@ function App() {
           </section>}
 
           {isCompany && <section className="panel">
-            <h4>यातायात कम्पनी KYC</h4>
+            <h4>{kycTr('यातायात कम्पनी KYC')}</h4>
             {field('कम्पनीको नाम','company_name')}
             {field('कम्पनी दर्ता नम्बर','company_registration_number')}
             {field('कम्पनी दर्ता भएको मिति','company_issue_date','date')}
@@ -2289,8 +2386,8 @@ function App() {
           </section>}
         </>;
       })()}
-      <p>तपाईंको कागजात निजी भण्डारणमा राखिनेछ।</p>
-        <button className="primary">KYC सुरक्षित गर्नुहोस्</button>
+      <p>{kycTr("तपाईंको कागजात निजी भण्डारणमा राखिनेछ।")}</p>
+        <button className="primary">{kycTr("KYC सुरक्षित गर्नुहोस्")}</button>
       </form>}
 
 
