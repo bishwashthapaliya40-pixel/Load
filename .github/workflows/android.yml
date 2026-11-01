@@ -47,6 +47,8 @@ jobs:
           printf '%s' "$KEYSTORE_BASE64" | base64 --decode > android/keystore/loadmitra-release.jks
           printf 'storeFile=../keystore/loadmitra-release.jks\nstorePassword=%s\nkeyAlias=%s\nkeyPassword=%s\n' "$KEYSTORE_PASSWORD" "$KEY_ALIAS" "$KEY_PASSWORD" > android/key.properties
 
+      - name: Verify keystore file
+        run: sha256sum android/keystore/loadmitra-release.jks
       - name: Build APK and AAB
         working-directory: android
         run: chmod +x gradlew && ./gradlew assembleDebug bundleRelease
