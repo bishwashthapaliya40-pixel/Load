@@ -50,7 +50,7 @@ jobs:
           mkdir -p android/keystore
           printf '%s' "$KEYSTORE_BASE64" | base64 --decode > android/keystore/loadmitra-release.jks
           test -s android/keystore/loadmitra-release.jks
-          printf 'storeFile=../keystore/loadmitra-release.jks\nstorePassword=%s\nkeyAlias=%s\nkeyPassword=%s\n' "$KEYSTORE_PASSWORD" "$KEY_ALIAS" "$KEY_PASSWORD" > android/key.properties
+          printf 'storeFile=%s\nstorePassword=%s\nkeyAlias=%s\nkeyPassword=%s\n' "$GITHUB_WORKSPACE/android/keystore/loadmitra-release.jks" "$KEYSTORE_PASSWORD" "$KEY_ALIAS" "$KEY_PASSWORD" > android/key.properties
 
       - name: Verify keystore file
         run: sha256sum android/keystore/loadmitra-release.jks
