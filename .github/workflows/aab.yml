@@ -50,6 +50,8 @@ jobs:
           mkdir -p android/keystore
           printf '%s' "$KEYSTORE_BASE64" | base64 --decode > android/keystore/loadmitra-release.jks
           test -s android/keystore/loadmitra-release.jks
+          echo "Keystore bytes: $(wc -c < android/keystore/loadmitra-release.jks)"
+          sha256sum android/keystore/loadmitra-release.jks
           printf 'storeFile=%s\nstorePassword=%s\nkeyAlias=%s\nkeyPassword=%s\n' "$GITHUB_WORKSPACE/android/keystore/loadmitra-release.jks" "$KEYSTORE_PASSWORD" "$KEY_ALIAS" "$KEY_PASSWORD" > android/key.properties
 
       - name: Verify release keystore
