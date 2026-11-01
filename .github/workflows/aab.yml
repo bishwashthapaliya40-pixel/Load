@@ -10,7 +10,7 @@ jobs:
       - name: Get source code
         uses: actions/checkout@v4
         with:
-          ref: master
+          ref: main
 
       - name: Setup Node
         uses: actions/setup-node@v4
