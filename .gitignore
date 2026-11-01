@@ -6,3 +6,26 @@ coverage/
 *.log
 .env*
 !.env.example
+
+# Private files
+.env
+.env.*
+!.env.example
+android/key.properties
+android/local.properties
+android/keystore/
+keystore/
+node_modules/
+dist/
+android/.gradle/
+android/build/
+android/app/build/
+
+# Backup files
+src-backup*
+src-google-backup.jsx
+src-language-backup.jsx
+src.jsx.*
+src/VehicleMap.jsx.*
+style.css.backup
+android/app/src/main/AndroidManifest.xml.bak
