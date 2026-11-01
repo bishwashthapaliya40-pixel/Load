@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">LoadMitra</string>
+    <string name="title_activity_main">LoadMitra</string>
+    <string name="package_name">com.load.logistics</string>
+    <string name="custom_url_scheme">com.load.logistics</string>
+</resources>

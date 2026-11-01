@@ -29,3 +29,5 @@ src.jsx.*
 src/VehicleMap.jsx.*
 style.css.backup
 android/app/src/main/AndroidManifest.xml.bak
+
+android-backup/
