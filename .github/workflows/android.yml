@@ -55,6 +55,15 @@ jobs:
       - name: Verify keystore file
         run: sha256sum android/keystore/loadmitra-release.jks
 
+      - name: Test release private key
+        env:
+          STORE_PASS: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_PASS: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+        run: |
+          keytool -list -keystore android/keystore/loadmitra-release.jks -storepass "$STORE_PASS" -alias "$KEY_ALIAS"
+          keytool -certreq -alias "$KEY_ALIAS" -keystore android/keystore/loadmitra-release.jks -storepass "$STORE_PASS" -keypass "$KEY_PASS" -file "$RUNNER_TEMP/loadmitra-test.csr"
+
       - name: Build APK and AAB
         working-directory: android
         run: chmod +x gradlew && ./gradlew assembleDebug bundleRelease
