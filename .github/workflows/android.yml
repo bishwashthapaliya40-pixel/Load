@@ -1,4 +1,4 @@
-name: Build LoadMitra APK and AAB
+name: Build LoadMitra APK
 
 on:
   workflow_dispatch:
@@ -36,46 +36,12 @@ jobs:
       - name: Sync Android
         run: npx cap sync android
 
-      - name: Prepare release signing
-        env:
-          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
-          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
-          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
-          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
-        run: |
-          test -n "$KEYSTORE_BASE64"
-          test -n "$KEYSTORE_PASSWORD"
-          test -n "$KEY_ALIAS"
-          test -n "$KEY_PASSWORD"
-          mkdir -p android/keystore
-          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > android/keystore/loadmitra-release.jks
-          test -s android/keystore/loadmitra-release.jks
-          printf 'storeFile=%s\nstorePassword=%s\nkeyAlias=%s\nkeyPassword=%s\n' "$GITHUB_WORKSPACE/android/keystore/loadmitra-release.jks" "$KEYSTORE_PASSWORD" "$KEY_ALIAS" "$KEY_PASSWORD" > android/key.properties
-
-      - name: Verify keystore file
-        run: sha256sum android/keystore/loadmitra-release.jks
-
-      - name: Test release private key
-        env:
-          STORE_PASS: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
-          KEY_PASS: ${{ secrets.ANDROID_KEY_PASSWORD }}
-          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
-        run: |
-          keytool -list -keystore android/keystore/loadmitra-release.jks -storepass "$STORE_PASS" -alias "$KEY_ALIAS"
-          keytool -certreq -alias "$KEY_ALIAS" -keystore android/keystore/loadmitra-release.jks -storepass "$STORE_PASS" -keypass "$KEY_PASS" -file "$RUNNER_TEMP/loadmitra-test.csr"
-
-      - name: Build APK and AAB
+      - name: Build Debug APK only
         working-directory: android
-        run: chmod +x gradlew && ./gradlew assembleDebug bundleRelease
+        run: chmod +x gradlew && ./gradlew assembleDebug
 
       - name: Save Debug APK
         uses: actions/upload-artifact@v4
         with:
           name: LoadMitra-Android-APK
           path: android/app/build/outputs/apk/debug/*.apk
-
-      - name: Save Signed Release AAB
-        uses: actions/upload-artifact@v4
-        with:
-          name: LoadMitra-Release-AAB
-          path: android/app/build/outputs/bundle/release/*.aab
