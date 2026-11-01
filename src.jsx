@@ -1,4 +1,5 @@
 import { Capacitor } from '@capacitor/core';
+import { Camera, CameraResultType, CameraSource } from '@capacitor/camera';
 import { Geolocation } from '@capacitor/geolocation';
 import { App as CapApp } from '@capacitor/app';
 import { Browser } from '@capacitor/browser';
@@ -9,6 +10,80 @@ import NearbyVehicleMap from './src/VehicleMap.jsx';
 import React, { useState, useEffect } from 'react';
 import { createRoot } from 'react-dom/client';
 
+
+
+const LM_DRAFT_DB = 'loadmitra-camera-drafts';
+
+function openLoadMitraDraftDB() {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open(LM_DRAFT_DB, 1);
+    request.onupgradeneeded = () => {
+      if (!request.result.objectStoreNames.contains('files')) request.result.createObjectStore('files');
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+}
+
+async function saveLoadMitraDraftFile(key, file) {
+  if (!key || !file) return;
+  const db = await openLoadMitraDraftDB();
+  await new Promise((resolve, reject) => {
+    const tx = db.transaction('files', 'readwrite');
+    tx.objectStore('files').put(file, key);
+    tx.oncomplete = resolve;
+    tx.onerror = () => reject(tx.error);
+  });
+  db.close();
+}
+
+async function loadAllLoadMitraDraftFiles() {
+  const db = await openLoadMitraDraftDB();
+  const entries = await new Promise((resolve, reject) => {
+    const tx = db.transaction('files', 'readonly');
+    const store = tx.objectStore('files');
+    const request = store.getAllKeys();
+    request.onsuccess = () => {
+      const keys = request.result;
+      Promise.all(keys.map(key => new Promise((res, rej) => {
+        const getRequest = store.get(key);
+        getRequest.onsuccess = () => res([key, getRequest.result]);
+        getRequest.onerror = () => rej(getRequest.error);
+      }))).then(resolve, reject);
+    };
+    request.onerror = () => reject(request.error);
+  });
+  db.close();
+  return entries;
+}
+
+async function clearLoadMitraDraftFiles(prefix = 'kyc') {
+  const db = await openLoadMitraDraftDB();
+  await new Promise((resolve, reject) => {
+    const tx = db.transaction('files', 'readwrite');
+    const store = tx.objectStore('files');
+    const request = store.getAllKeys();
+    request.onsuccess = () => request.result
+      .filter(key => String(key).startsWith(prefix))
+      .forEach(key => store.delete(key));
+    request.onerror = () => reject(request.error);
+    tx.oncomplete = resolve;
+    tx.onerror = () => reject(tx.error);
+  });
+  db.close();
+}
+
+function loadMitraCameraFile(photo, target) {
+  if (!photo?.base64String) throw new Error('क्यामेराबाट फोटोको डेटा प्राप्त भएन।');
+  const format = (photo.format || 'jpeg').toLowerCase();
+  const mime = format === 'png' ? 'image/png' : format === 'webp' ? 'image/webp' : 'image/jpeg';
+  const ext = format === 'png' || format === 'webp' ? format : 'jpg';
+  const binary = atob(photo.base64String);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  const safeTarget = target.replace(/[^a-zA-Z0-9_-]/g, '_');
+  return new File([bytes], `loadmitra-${safeTarget}-${Date.now()}.${ext}`, { type: mime });
+}
 
 async function getCurrentGpsPosition() {
   if (Capacitor.isNativePlatform()) {
@@ -190,8 +265,137 @@ function AdminSupportPanel({ supabase }) {
   </section>;
 }
 
+
+function CameraGalleryPicker({accept='image/*', capture='environment', selectedFile, onChange, restoreKey, language='नेपाली'}) {
+  const cameraRef = React.useRef(null);
+  const galleryRef = React.useRef(null);
+
+  const words = {
+    'नेपाली': {title:'तस्बिर थप्नुहोस्', camera:'क्यामेराबाट खिच्नुहोस्', gallery:'ग्यालरीबाट छान्नुहोस्', selected:'छानिएको तस्बिर'},
+    'English': {title:'Add a photo', camera:'Take a photo', gallery:'Choose from gallery', selected:'Selected photo'},
+    'हिन्दी': {title:'फोटो जोड़ें', camera:'कैमरे से फोटो लें', gallery:'गैलरी से चुनें', selected:'चुनी गई फोटो'},
+    '中文': {title:'添加照片', camera:'拍摄照片', gallery:'从相册选择', selected:'已选择的照片'}
+  };
+  const t = words[language] || words['नेपाली'];
+
+  const chooseFile = async (event) => {
+    const file = event.target.files?.[0] || null;
+    if (file) {
+      try {
+        if (restoreKey) await saveLoadMitraDraftFile(restoreKey, file);
+      } catch (error) {
+        console.warn('फाइल draft सुरक्षित भएन:', error);
+      }
+      onChange?.(file);
+    }
+    event.target.value = '';
+    if (restoreKey) {
+      localStorage.removeItem('loadmitra_camera_target');
+      localStorage.removeItem('loadmitra_camera_started_at');
+      localStorage.removeItem('loadmitra_camera_page');
+    }
+  };
+
+  const takePhoto = async () => {
+    if (!Capacitor.isNativePlatform()) {
+      if (restoreKey) {
+        localStorage.setItem('loadmitra_camera_target', restoreKey);
+        localStorage.setItem('loadmitra_camera_started_at', String(Date.now()));
+        localStorage.setItem('loadmitra_camera_page', 'kyc');
+      }
+      cameraRef.current?.click();
+      return;
+    }
+    if (!restoreKey) return;
+
+    localStorage.setItem('loadmitra_camera_target', restoreKey);
+    localStorage.setItem('loadmitra_camera_started_at', String(Date.now()));
+    try {
+      const photo = await Camera.getPhoto({
+        quality: 90,
+        allowEditing: false,
+        resultType: CameraResultType.Base64,
+        source: CameraSource.Camera
+      });
+      const file = loadMitraCameraFile(photo, restoreKey);
+      await saveLoadMitraDraftFile(restoreKey, file);
+      localStorage.removeItem('loadmitra_camera_target');
+      localStorage.removeItem('loadmitra_camera_started_at');
+      localStorage.removeItem('loadmitra_camera_page');
+      onChange?.(file);
+    } catch (error) {
+      localStorage.removeItem('loadmitra_camera_target');
+      localStorage.removeItem('loadmitra_camera_started_at');
+      if (!String(error?.message || '').toLowerCase().includes('cancel')) {
+        console.error('Camera error:', error);
+      }
+    }
+  };
+
+  const optionStyle = {
+    flex: 1,
+    minWidth: 0,
+    minHeight: 48,
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 7,
+    padding: '10px 8px',
+    borderRadius: 10,
+    border: '1px solid #d5deea',
+    background: '#ffffff',
+    color: '#102b46',
+    fontSize: 13,
+    fontWeight: 600,
+    lineHeight: 1.35,
+    cursor: 'pointer',
+    whiteSpace: 'normal'
+  };
+
+  return (
+    <div style={{
+      display:'grid',
+      gap:9,
+      marginTop:8,
+      padding:11,
+      border:'1px solid #dce4ed',
+      borderRadius:13,
+      background:'#f5f8fc',
+      width:'100%',
+      boxSizing:'border-box'
+    }}>
+      <div style={{fontSize:13,fontWeight:700,color:'#344b63'}}>
+        {t.title}
+      </div>
+      <div style={{display:'flex',gap:9,width:'100%'}}>
+        <button type="button" onClick={takePhoto}
+          style={{...optionStyle,border:'1px solid #ff6500',background:'#fff4eb',color:'#b84900'}}>
+          <span style={{fontSize:19}}>📷</span>
+          <span>{t.camera}</span>
+        </button>
+        <button type="button" onClick={() => galleryRef.current?.click()}
+          style={optionStyle}>
+          <span style={{fontSize:19}}>🖼️</span>
+          <span>{t.gallery}</span>
+        </button>
+      </div>
+      <input ref={cameraRef} type="file" accept="image/*" capture={capture}
+        onChange={chooseFile} style={{display:'none'}}/>
+      <input ref={galleryRef} type="file" accept={accept}
+        onChange={chooseFile} style={{display:'none'}}/>
+      {selectedFile && (
+        <div style={{fontSize:12,color:'#17633c',background:'#eaf7ef',padding:'7px 9px',borderRadius:8,overflowWrap:'anywhere'}}>
+          ✓ {t.selected}: {selectedFile.name}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function App() {
-  const [page, setPage] = useState('home');
+  const [page, setPage] = useState(() =>
+    (localStorage.getItem('loadmitra_camera_target') || '').startsWith('kyc') ? 'kyc' : 'home'
+  );
   const [adminKycFilter, setAdminKycFilter] = useState('all');
   const [adminKycSearch, setAdminKycSearch] = useState('');
   const [adminGlobalSearch, setAdminGlobalSearch] = useState('');
@@ -207,6 +411,7 @@ function App() {
   const [adminOperationsFilter, setAdminOperationsFilter] = useState('all');
 
   const [loads, setLoads] = useState([]);
+  const [vehiclePosts, setVehiclePosts] = useState([]);
   const [clockNow, setClockNow] = useState(Date.now());
 
   useEffect(() => {
@@ -233,7 +438,25 @@ function App() {
     const refreshTimer = setInterval(fetchLoads, 30000);
     return () => clearInterval(refreshTimer);
   }, []);
-  const [form, setForm] = useState({});
+  useEffect(() => {
+    const fetchVehiclePosts = async () => {
+      const { data, error } = await supabase
+        .from('vehicle_posts')
+        .select('id, owner_id, vehicle_type, load_capacity, capacity_unit, origin, destination, proposed_price, available_at, expires_at')
+        .eq('status', 'open')
+        .gt('expires_at', new Date().toISOString())
+        .order('created_at', { ascending: false });
+      if (!error && data) setVehiclePosts(data);
+    };
+    fetchVehiclePosts();
+    const timer = setInterval(fetchVehiclePosts, 30000);
+    return () => clearInterval(timer);
+  }, []);
+
+  const [form, setForm] = useState(() => {
+    try { return JSON.parse(localStorage.getItem('loadmitra_kyc_draft') || '{}'); }
+    catch { return {}; }
+  });
   const [message, setMessage] = useState('');
 
   const [language, setLanguage] = useState(() => localStorage.getItem('load_language') || 'नेपाली');
@@ -241,12 +464,17 @@ function App() {
   const [mainMenuOpen, setMainMenuOpen] = useState(false);
   const [welcomeAction, setWelcomeAction] = useState('');
   const [navHistory, setNavHistory] = useState([]);
-  const [role, setRole] = useState('');
+  const [role, setRole] = useState(() => localStorage.getItem('load_role') || '');
   const [roleCategory, setRoleCategory] = useState('');
   const [roleType, setRoleType] = useState(() => localStorage.getItem('load_role_type') || '');
   const [authStep, setAuthStep] = useState('details');
   const [phone, setPhone] = useState('');
   const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [fullName, setFullName] = useState('');
+  const [signupAddress, setSignupAddress] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
   const [otp, setOtp] = useState('');
   const [authMessage, setAuthMessage] = useState('');
   const [kycFrontFile, setKycFrontFile] = useState(null);
@@ -297,6 +525,9 @@ function App() {
   const [isAppAdmin, setIsAppAdmin] = useState(false);
   const [isRootAdmin, setIsRootAdmin] = useState(false);
   const [kycCheckComplete, setKycCheckComplete] = useState(false);
+  const [kycEditMode, setKycEditMode] = useState(false);
+  const [existingKycFiles, setExistingKycFiles] = useState({photo_path:'', document_path:'', document_back_path:''});
+  const [existingKycDocs, setExistingKycDocs] = useState([]);
 
   useEffect(() => {
     if (authStep !== 'complete') {
@@ -304,12 +535,28 @@ function App() {
       return;
     }
     if (!role || page === 'admin-application' || page.startsWith('settings-admin')) return;
+    if (kycEditMode && page === 'kyc') return;
     setKycCheckComplete(false);
     let active = true;
     (async () => {
       try {
         const { data: auth } = await supabase.auth.getUser();
         if (!auth?.user) return;
+      const demo = auth.user.email?.toLowerCase() === 'linuxk082@gmail.com';
+      setIsDemoAccount(demo);
+      if (demo) {
+        if (active) {
+          setProviderVehicle({
+            name: 'LoadMitra परीक्षण खाता', phone: '',
+            number: 'DEMO-TEST', type: 'परीक्षण गाडी',
+            capacity: '5', unit: 'ton', isDemo: true
+          });
+          setAccountKycStatus('DEMO / TEST');
+          setKycCheckComplete(true);
+          if (page === 'kyc' || page === 'kyc-pending') setPage('home');
+        }
+        return;
+      }
         const { data: admin, error: adminError } = await supabase.rpc('is_app_admin');
       const { data: rootAdmin, error: rootError } = await supabase.rpc('is_root_admin');
       if (!active) return;
@@ -375,7 +622,7 @@ function App() {
       }
     })();
     return () => { active = false; };
-  }, [authStep, role, page]);
+  }, [authStep, role, page, kycEditMode]);
 
   const [adminKyc, setAdminKyc] = useState([]);
   const [adminKycDocuments, setAdminKycDocuments] = useState([]);
@@ -408,6 +655,72 @@ function App() {
   const [profilePhotoFile, setProfilePhotoFile] = useState(null);
   const [profilePhotoUrl, setProfilePhotoUrl] = useState('');
   const [providerVehicle, setProviderVehicle] = useState({});
+  const [isDemoAccount, setIsDemoAccount] = useState(false);
+
+  useEffect(() => {
+    let active = true;
+
+    const applyRestoredFile = (target, file) => {
+      if (!file) return;
+      if (target === 'kycPhoto') setKycPhotoFile(file);
+      else if (target === 'kycFront') setKycFrontFile(file);
+      else if (target === 'kycBack') setKycBackFile(file);
+      else if (target.startsWith('kycExtra:')) {
+        const key = target.slice('kycExtra:'.length);
+        setKycExtraDocs(old => ({...old, [key]: file}));
+      } else if (target === 'profilePhoto') setProfilePhotoFile(file);
+      else if (target === 'adminApplicantPhoto') setAdminApplicantPhoto(file);
+      else if (target === 'adminDocumentFront') setAdminDocumentFront(file);
+      else if (target === 'adminDocumentBack') setAdminDocumentBack(file);
+    };
+
+    const restoredListener = CapApp.addListener('appRestoredResult', async result => {
+      if (result.pluginId !== 'Camera' || result.methodName !== 'getPhoto') return;
+      const target = localStorage.getItem('loadmitra_camera_target');
+      if (!target) return;
+      try {
+        if (result.success === false) throw new Error(result.error?.message || 'फोटो खिच्न सकिएन।');
+        const file = loadMitraCameraFile(result.data, target);
+        await saveLoadMitraDraftFile(target, file);
+        if (!active) return;
+        applyRestoredFile(target, file);
+        if (target.startsWith('kyc')) setPage('kyc');
+      } catch (error) {
+        if (active) {
+          if (target.startsWith('kyc')) setPage('kyc');
+          setMessage('क्यामेराबाट फोटो फिर्ता ल्याउन सकिएन: ' + (error.message || 'फेरि प्रयास गर्नुहोस्।'));
+        }
+      } finally {
+        localStorage.removeItem('loadmitra_camera_target');
+      }
+    });
+
+    (async () => {
+      try {
+        const entries = await loadAllLoadMitraDraftFiles();
+        if (!active) return;
+        entries.forEach(([key, file]) => applyRestoredFile(String(key), file));
+      } catch (error) {
+        console.warn('Draft files restore भएनन्:', error);
+      }
+    })();
+
+    return () => {
+      active = false;
+      restoredListener.then(listener => listener.remove()).catch(() => {});
+    };
+  }, []);
+
+  useEffect(() => {
+    if (page === 'kyc' || (localStorage.getItem('loadmitra_camera_target') || '').startsWith('kyc')) {
+      try {
+        localStorage.setItem('loadmitra_kyc_draft', JSON.stringify(form));
+      } catch (error) {
+        console.warn('KYC draft सुरक्षित भएन:', error);
+      }
+    }
+  }, [form, page]);
+
 
 
   useEffect(() => {
@@ -417,6 +730,26 @@ function App() {
       try {
         const { data: auth } = await supabase.auth.getUser();
         if (!auth?.user) return;
+      if (auth.user.email?.toLowerCase() === 'linuxk082@gmail.com') {
+        if (active) {
+          setProviderVehicle({
+            name: 'LoadMitra परीक्षण खाता', phone: '+9779800000000',
+            number: 'DEMO-TEST', type: 'परीक्षण गाडी',
+            capacity: '5', unit: 'ton', isDemo: true
+          });
+          const demoDate = new Date(Date.now() + 86400000);
+          const localDate = new Date(demoDate.getTime() - demoDate.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+          setForm(prev => ({
+            ...prev,
+            provider_phone: '+9779800000000',
+            provider_origin: 'Kathmandu, Nepal',
+            provider_destination: 'Pokhara, Nepal',
+            provider_available_at: localDate,
+            provider_price: '15000'
+          }));
+        }
+        return;
+      }
         const { data: profile } = await supabase.from('load_profiles')
           .select('display_name,phone').eq('user_id', auth.user.id).maybeSingle();
         const { data: kyc } = await supabase.from('kyc_records')
@@ -482,9 +815,9 @@ function App() {
         setProfileEmail(auth.user.email || data?.email || '');
         setProfileStatus(data?.account_status || 'active');
         if (data?.photo_path) {
-          const { data: urlData } = supabase.storage
-            .from('load-profile-photos').getPublicUrl(data.photo_path);
-          setProfilePhotoUrl(urlData.publicUrl);
+          const { data: signed } = await supabase.storage
+            .from('load-profile-photos').createSignedUrl(data.photo_path, 3600);
+          setProfilePhotoUrl(signed?.signedUrl || supabase.storage.from('load-profile-photos').getPublicUrl(data.photo_path).data.publicUrl);
         } else {
           setProfilePhotoUrl('');
         }
@@ -536,13 +869,20 @@ function App() {
     const finishLogin = async () => {
       const { data: { session } } = await supabase.auth.getSession();
       if (session) {
-        const savedRole = localStorage.getItem('load_role');
-        if (savedRole) setRole(savedRole);
-        if (session.user?.id === '0cff7068-0096-4032-8983-a70839aa064e') {
+        const isRoot = session.user?.id === '0cff7068-0096-4032-8983-a70839aa064e';
+        if (isRoot) {
           setIsAppAdmin(true);
           setIsRootAdmin(true);
           setKycCheckComplete(true);
           setAccountKycStatus('स्वीकृत (Approved)');
+        } else {
+          const cameraStartedAt = Number(localStorage.getItem('loadmitra_camera_started_at') || 0);
+          const cameraReturnActive = cameraStartedAt > 0 && Date.now() - cameraStartedAt < 120000;
+          const cameraTargetActive = Boolean(localStorage.getItem('loadmitra_camera_target'));
+          if (!cameraReturnActive && !cameraTargetActive) {
+            localStorage.removeItem('load_role');
+            setRole('');
+          }
         }
         setAuthStep('complete');
       }
@@ -594,8 +934,19 @@ function App() {
           return;
         }
         if (session) {
-          const savedRole = localStorage.getItem('load_role');
-          if (savedRole) setRole(savedRole);
+          const cameraStartedAt = Number(localStorage.getItem('loadmitra_camera_started_at') || 0);
+          const cameraReturnActive = cameraStartedAt > 0 && Date.now() - cameraStartedAt < 120000;
+          const cameraTargetActive = Boolean(localStorage.getItem('loadmitra_camera_target'));
+          if (event === 'SIGNED_IN' && !cameraTargetActive && !cameraReturnActive) {
+            localStorage.removeItem('load_role');
+            setRole('');
+          } else if (cameraTargetActive || cameraReturnActive) {
+            const savedRole = localStorage.getItem('load_role');
+            if (savedRole) setRole(savedRole);
+            if (event === 'SIGNED_IN' && cameraReturnActive) {
+              localStorage.removeItem('loadmitra_camera_started_at');
+            }
+          }
           if (session.user?.id === '0cff7068-0096-4032-8983-a70839aa064e') {
             setIsAppAdmin(true);
             setIsRootAdmin(true);
@@ -707,7 +1058,7 @@ function App() {
       'तपाईंको ढुवानी, अब सजिलो!':'आपकी ढुलाई, अब आसान!',
       'लोड खोज्नुहोस्। गाडी जोड्नुहोस्। कागजात व्यवस्थित राख्नुहोस्।':'लोड खोजें। वाहन जोड़ें। दस्तावेज़ व्यवस्थित रखें।',
       'तपाईंलाई के चाहिएको छ?':'आपको क्या चाहिए?',
-      'ढुवानीका लागि गाडी खोज्नुहोस्':'लोड पोस्ट करें','नयाँ सामान ढुवानीको विवरण':'नई खेप का विवरण',
+      'ढुवानीका लागि गाडी खोज्नुहोस्':'सामान के लिए वाहन खोजें','नयाँ सामान ढुवानीको विवरण':'नई खेप का विवरण',
       'गाडीका लागि लोड खोज्नुहोस्':'लोड खोजें','उपलब्ध ढुवानीका कामहरू':'उपलब्ध ढुलाई के काम',
       'गाडी दर्ता गर्नुहोस्':'वाहन पंजीकृत करें','गाडी र क्षमता विवरण':'वाहन और क्षमता विवरण',
       'ड्राइभरको लाइसेन्स':'ड्राइवर लाइसेंस','लाइसेन्स विवरण र फोटो':'लाइसेंस विवरण और फोटो',
@@ -754,7 +1105,7 @@ function App() {
       'तपाईंको ढुवानी, अब सजिलो!':'让货运更简单！',
       'लोड खोज्नुहोस्। गाडी जोड्नुहोस्। कागजात व्यवस्थित राख्नुहोस्।':'寻找货源、连接车辆、管理文件。',
       'तपाईंलाई के चाहिएको छ?':'您需要什么？',
-      'ढुवानीका लागि गाडी खोज्नुहोस्':'发布货源','नयाँ सामान ढुवानीको विवरण':'新货运信息',
+      'ढुवानीका लागि गाडी खोज्नुहोस्':'寻找货物运输车辆','नयाँ सामान ढुवानीको विवरण':'新货运信息',
       'गाडीका लागि लोड खोज्नुहोस्':'寻找货源','उपलब्ध ढुवानीका कामहरू':'可用运输任务',
       'गाडी दर्ता गर्नुहोस्':'登记车辆','गाडी र क्षमता विवरण':'车辆及载重信息',
       'ड्राइभरको लाइसेन्स':'司机驾照','लाइसेन्स विवरण र फोटो':'驾照信息和照片',
@@ -784,7 +1135,7 @@ function App() {
       'नयाँ लोड पोस्ट':'发布新货源','गाडीको विवरण सुरक्षित गर्नुहोस्':'保存车辆信息',
       'विवरण सुरक्षित गर्नुहोस्':'保存信息','कम्पनीको विवरण सुरक्षित गर्नुहोस्':'保存公司信息',
       'चलानी सुरक्षित गर्नुहोस्':'保存运输单据','← मुख्य पृष्ठमा फर्कनुहोस्':'← 返回首页',
-      'ढुवानीको सजिलो साथी':'您的运输伙伴','विवरण यस एपमा सुरक्षित भयो。':'信息已保存在此应用中。',
+      'ढुवानीको सजिलो साथी':'您的运输伙伴','विवरण यस एपमा सुरक्षित भयो।':'信息已保存在此应用中。',
     
       'मेरा बुकिङ': '我的预订',
       'बुकिङ सूची': '预订列表',
@@ -822,7 +1173,7 @@ function App() {
       },
       'हिन्दी': {
     'लोड पोस्ट रद्द भयो': 'लोड पोस्ट रद्द हुई',
-    'तपाईंले बुक गरेको लोड पोस्ट रद्द भएको छ।': '您预订的货运已取消。',
+    'तपाईंले बुक गरेको लोड पोस्ट रद्द भएको छ।': 'आपकी बुकिंग का लोड पोस्ट रद्द हुआ है।',
     'सम्बन्धित लोड पोस्ट रद्द भएको छ।': '相关货运已取消。',
         'सूचनाहरू':'सूचनाएँ','अहिले कुनै सूचना छैन।':'अभी कोई सूचना नहीं है।',
         'सबै सूचनाहरू':'सभी सूचनाएँ','पढिएको':'पढ़ा गया','नयाँ':'नई',
@@ -960,7 +1311,18 @@ const kycTr = (text) => {
   const index = {'English':0,'हिन्दी':1,'中文':2}[language];
   return index === undefined ? text : (kycTranslations[text]?.[index] || text);
 };
-const tr = (text) => featureTranslations[language]?.[text] || translations[language]?.[text] || text;
+const extraTranslations = {
+'English': {'गाडी उपलब्ध गराउनुहोस् — लोडका लागि पोस्ट':'Provide a Vehicle — Post for Loads','गाडी उपलब्ध गराउनुहोस्':'Provide a Vehicle','वास्तविक कारोबार हुँदैन।':'No real transactions.','यो नक्कली परीक्षण विवरण हो, वास्तविक गाडी पोस्ट गर्न मिल्दैन।':'This is fake test information. Real vehicle posting is disabled.','यो Demo गाडी परीक्षणका लागि मात्र हो।':'This demo vehicle is for testing only.','गाडीको स्थायी विवरण स्वीकृत KYC बाट स्वतः भरिन्छ।':'Permanent vehicle details are auto-filled from approved KYC.','गाडीधनी / सेवा प्रदायक':'Vehicle Owner / Service Provider','गाडी नम्बर (स्वीकृत KYC)':'Vehicle Number (Approved KYC)','गाडीको प्रकार (स्वीकृत KYC)':'Vehicle Type (Approved KYC)','लोड क्षमता (स्वीकृत KYC)':'Load Capacity (Approved KYC)','सम्पर्क नम्बर':'Contact Number','गाडीको हालको स्थान':'Vehicle Current Location','हालको GPS स्थान लिनुहोस्':'Get Current GPS Location','गाडी जान सक्ने गन्तव्य':'Destination Vehicle Can Travel To','उपलब्ध हुने मिति/समय (वैकल्पिक)':'Available Date/Time (Optional)','प्रस्तावित भाडा (रु., वैकल्पिक)':'Proposed Fare (NPR, Optional)','गाडीको विवरण नदेखिए स्वीकृत KYC जाँच गर्नुहोस्।':'If vehicle details are missing, check approved KYC.','गाडीको प्रकार, नम्बर र क्षमता स्वीकृत KYC बाट देखाइनेछ।':'Vehicle type, number and capacity will appear from approved KYC.','गाडी नम्बर':'Vehicle Number','गाडीको प्रकार':'Vehicle Type','लोड क्षमता':'Load Capacity','उपलब्ध लोडहरू हेर्नुहोस्':'View Available Loads','गाडीको पोस्ट सुरक्षित गर्नुहोस्':'Save Vehicle Post'},
+'हिन्दी': {'गाडी उपलब्ध गराउनुहोस् — लोडका लागि पोस्ट':'वाहन उपलब्ध कराएँ — लोड के लिए पोस्ट करें','गाडी उपलब्ध गराउनुहोस्':'वाहन उपलब्ध कराएँ','वास्तविक कारोबार हुँदैन।':'कोई वास्तविक लेन-देन नहीं होगा।','यो नक्कली परीक्षण विवरण हो, वास्तविक गाडी पोस्ट गर्न मिल्दैन।':'यह नकली परीक्षण विवरण है। वास्तविक वाहन पोस्ट नहीं किया जा सकता।','यो Demo गाडी परीक्षणका लागि मात्र हो।':'यह डेमो वाहन केवल परीक्षण के लिए है।','गाडीको स्थायी विवरण स्वीकृत KYC बाट स्वतः भरिन्छ।':'वाहन का स्थायी विवरण स्वीकृत KYC से अपने आप भरेगा।','गाडीधनी / सेवा प्रदायक':'वाहन मालिक / सेवा प्रदाता','गाडी नम्बर (स्वीकृत KYC)':'वाहन नंबर (स्वीकृत KYC)','गाडीको प्रकार (स्वीकृत KYC)':'वाहन का प्रकार (स्वीकृत KYC)','लोड क्षमता (स्वीकृत KYC)':'लोड क्षमता (स्वीकृत KYC)','सम्पर्क नम्बर':'संपर्क नंबर','गाडीको हालको स्थान':'वाहन का वर्तमान स्थान','हालको GPS स्थान लिनुहोस्':'वर्तमान GPS स्थान प्राप्त करें','गाडी जान सक्ने गन्तव्य':'वाहन का गंतव्य','उपलब्ध हुने मिति/समय (वैकल्पिक)':'उपलब्धता की तारीख/समय (वैकल्पिक)','प्रस्तावित भाडा (रु., वैकल्पिक)':'प्रस्तावित किराया (रु., वैकल्पिक)','गाडीको विवरण नदेखिए स्वीकृत KYC जाँच गर्नुहोस्।':'वाहन का विवरण न दिखे तो स्वीकृत KYC जाँचें।','गाडीको प्रकार, नम्बर र क्षमता स्वीकृत KYC बाट देखाइनेछ।':'वाहन का प्रकार, नंबर और क्षमता स्वीकृत KYC से दिखेंगे।','गाडी नम्बर':'वाहन नंबर','गाडीको प्रकार':'वाहन का प्रकार','लोड क्षमता':'लोड क्षमता','उपलब्ध लोडहरू हेर्नुहोस्':'उपलब्ध लोड देखें','गाडीको पोस्ट सुरक्षित गर्नुहोस्':'वाहन पोस्ट सुरक्षित करें'},
+'中文': {'गाडी उपलब्ध गराउनुहोस् — लोडका लागि पोस्ट':'提供车辆 — 发布货运信息','गाडी उपलब्ध गराउनुहोस्':'提供车辆','वास्तविक कारोबार हुँदैन।':'不会进行真实交易。','यो नक्कली परीक्षण विवरण हो, वास्तविक गाडी पोस्ट गर्न मिल्दैन।':'这是虚拟测试信息，不能发布真实车辆。','यो Demo गाडी परीक्षणका लागि मात्र हो।':'此演示车辆仅用于测试。','गाडीको स्थायी विवरण स्वीकृत KYC बाट स्वतः भरिन्छ।':'车辆固定信息将从已批准的 KYC 自动填写。','गाडीधनी / सेवा प्रदायक':'车主 / 服务提供者','गाडी नम्बर (स्वीकृत KYC)':'车牌号（已批准 KYC）','गाडीको प्रकार (स्वीकृत KYC)':'车辆类型（已批准 KYC）','लोड क्षमता (स्वीकृत KYC)':'载货能力（已批准 KYC）','सम्पर्क नम्बर':'联系电话','गाडीको हालको स्थान':'车辆当前位置','हालको GPS स्थान लिनुहोस्':'获取当前位置 GPS','गाडी जान सक्ने गन्तव्य':'车辆可前往的目的地','उपलब्ध हुने मिति/समय (वैकल्पिक)':'可用日期/时间（可选）','प्रस्तावित भाडा (रु., वैकल्पिक)':'报价（卢比，可选）','गाडीको विवरण नदेखिए स्वीकृत KYC जाँच गर्नुहोस्।':'如果未显示车辆信息，请检查已批准的 KYC。','गाडीको प्रकार, नम्बर र क्षमता स्वीकृत KYC बाट देखाइनेछ।':'车辆类型、号码和载货能力将显示已批准的 KYC 信息。','गाडी नम्बर':'车牌号','गाडीको प्रकार':'车辆类型','लोड क्षमता':'载货能力','उपलब्ध लोडहरू हेर्नुहोस्':'查看可用货运','गाडीको पोस्ट सुरक्षित गर्नुहोस्':'保存车辆发布'}
+};
+const finalTranslations = {'English': {'Account / खाता स्थिति': 'Account Status', 'हालको भूमिका:': 'Current Role:', 'खाता स्थिति:': 'Account Status:', 'KYC प्रमाणिकरण:': 'KYC Verification:', 'प्रशासक टिप्पणी:': 'Admin Note:', 'KYC विवरण खोल्नुहोस्': 'Open KYC Details', 'Admin Login / प्रशासक लगइन': 'Admin Login', 'Create Admin Account / Admin बन्न आवेदन': 'Apply for Admin Account', 'Forgot Password? / पासवर्ड बिर्सनुभयो?': 'Forgot Password?', 'Reset Password / नयाँ पासवर्ड राख्नुहोस्': 'Reset Password', 'पासवर्ड रिसेट इमेलको लिंकबाट यो पेज खोलेपछि नयाँ पासवर्ड राख्नुहोस्।': 'Open this page from the password reset email link to set a new password.', 'नयाँ पासवर्ड (कम्तीमा 8 अक्षर)': 'New Password (at least 8 characters)', 'नयाँ पासवर्ड फेरि लेख्नुहोस्': 'Re-enter New Password', 'Change Password / पासवर्ड परिवर्तन': 'Change Password', 'Login / लगइन': 'Login', 'Admin Account Application / Admin आवेदन': 'Admin Account Application', 'आवेदन Root Admin ले जाँच गर्नेछन्। फारम पठाउँदैमा Admin अधिकार प्राप्त हुँदैन।': 'The Root Admin will review your application. Submitting this form does not grant admin access.', 'परिचयपत्रको प्रकार': 'ID Type', 'पासपोर्ट साइज फोटो (अनिवार्य, अगाडिबाट खिचेको)': 'Passport-size Photo (Required, front-facing)', 'आफ्नो अनुहार स्पष्ट देखिने पासपोर्ट साइज फोटो छान्नुहोस्।': 'Choose a passport-size photo showing your face clearly.', 'परिचयपत्र अगाडिको फोटो': 'Front of ID', 'परिचयपत्र पछाडिको फोटो': 'Back of ID', 'मैले दिएको विवरण सत्य हो। म आफ्नो जिम्मेवारी बुझेर Admin आवेदन दिँदैछु र नियम पालना गर्नेछु।': 'I confirm the information is true, understand my responsibilities, and will follow the rules.', 'ऐच्छिक: Admin बन्न चाहनुको कारण लेख्नुहोस्': 'Optional: Explain why you want to become an admin', 'Admin बन्ने निवेदन': 'Admin Application', 'फर्कनुहोस्': 'Go Back', 'Privacy / गोपनीयता': 'Privacy', 'Lists / सूचीहरू': 'Lists', 'Notifications / सूचनाहरू': 'Notifications', 'लोड, बुकिङ र खातासम्बन्धी सूचनाहरू यहाँ हेर्नुहोस्।': 'View load, booking and account notifications here.', 'सूचनाहरू हेर्नुहोस्': 'View Notifications', 'Storage and Data / डाटा': 'Storage and Data', 'मोबाइलमा फाइल र डाटा व्यवस्थापन सुविधा पछि जोड्न सकिन्छ।': 'File and data management on mobile may be added later.', 'App Language / एपको भाषा': 'App Language', 'Help Center / सहायता केन्द्र': 'Help Center', 'समस्याको प्रकार': 'Issue Type', 'विषय': 'Subject', 'विवरण / सन्देश': 'Details / Message', 'समस्या छोटकरीमा लेख्नुहोस्': 'Briefly describe the issue', 'आफ्नो समस्या वा गुनासो लेख्नुहोस्': 'Describe your issue or complaint', 'Admin लाई पठाउनुहोस्': 'Send to Admin', 'मेरा सहायता अनुरोधहरू': 'My Support Requests', 'रिफ्रेस गर्नुहोस्': 'Refresh', 'City / सहर': 'City', 'आफ्नो सहर': 'Your City', 'Save City': 'Save City', 'Request History / अनुरोध इतिहास': 'Request History', 'पूरा भएका ढुवानी': 'Completed Deliveries', 'वास्तविक कमाइ': 'Actual Earnings', 'वास्तविक दूरी': 'Actual Distance', 'म्यापबाट भएका बुकिङ': 'Map Bookings', 'म्याप बुकिङ इतिहास छैन।': 'No map booking history.', 'उठाउने स्थान:': 'Pickup:', 'गन्तव्य:': 'Destination:', 'सामान:': 'Goods:', 'मिति:': 'Date:', 'स्थिति:': 'Status:', 'प्रस्तावित भाडा:': 'Proposed Fare:', 'वास्तविक दूरी र कमाइ: रेकर्ड छैन': 'No actual distance or earnings recorded', 'बुकिङ तथा ढुवानी': 'Bookings and Deliveries', 'अहिलेसम्म बुकिङ इतिहास छैन।': 'No booking history yet.', 'वास्तविक दूरी:': 'Actual Distance:', 'वास्तविक भाडा:': 'Actual Fare:', 'मैले पोस्ट गरेका लोड': 'My Posted Loads', 'पोस्ट गरेका लोड छैनन्।': 'No posted loads.', 'पोस्ट रद्द गर्नुहोस्': 'Cancel Post', 'फेरि पोस्ट गर्नुहोस्': 'Post Again', 'लोड ID:': 'Load ID:'}, 'हिन्दी': {'Account / खाता स्थिति': 'खाता स्थिति', 'हालको भूमिका:': 'वर्तमान भूमिका:', 'खाता स्थिति:': 'खाते की स्थिति:', 'KYC प्रमाणिकरण:': 'KYC सत्यापन:', 'प्रशासक टिप्पणी:': 'एडमिन टिप्पणी:', 'KYC विवरण खोल्नुहोस्': 'KYC विवरण खोलें', 'Admin Login / प्रशासक लगइन': 'एडमिन लॉगिन', 'Create Admin Account / Admin बन्न आवेदन': 'एडमिन खाते के लिए आवेदन करें', 'Forgot Password? / पासवर्ड बिर्सनुभयो?': 'पासवर्ड भूल गए?', 'Reset Password / नयाँ पासवर्ड राख्नुहोस्': 'पासवर्ड रीसेट करें', 'पासवर्ड रिसेट इमेलको लिंकबाट यो पेज खोलेपछि नयाँ पासवर्ड राख्नुहोस्।': 'पासवर्ड रीसेट ईमेल के लिंक से यह पेज खोलकर नया पासवर्ड सेट करें।', 'नयाँ पासवर्ड (कम्तीमा 8 अक्षर)': 'नया पासवर्ड (कम से कम 8 अक्षर)', 'नयाँ पासवर्ड फेरि लेख्नुहोस्': 'नया पासवर्ड दोबारा लिखें', 'Change Password / पासवर्ड परिवर्तन': 'पासवर्ड बदलें', 'Login / लगइन': 'लॉगिन', 'Admin Account Application / Admin आवेदन': 'एडमिन खाते का आवेदन', 'आवेदन Root Admin ले जाँच गर्नेछन्। फारम पठाउँदैमा Admin अधिकार प्राप्त हुँदैन।': 'आवेदन की समीक्षा Root Admin करेंगे। फॉर्म भेजने से एडमिन अधिकार नहीं मिलते।', 'परिचयपत्रको प्रकार': 'पहचान पत्र का प्रकार', 'पासपोर्ट साइज फोटो (अनिवार्य, अगाडिबाट खिचेको)': 'पासपोर्ट आकार की फोटो (अनिवार्य)', 'आफ्नो अनुहार स्पष्ट देखिने पासपोर्ट साइज फोटो छान्नुहोस्।': 'अपना चेहरा साफ दिखाने वाली पासपोर्ट आकार की फोटो चुनें।', 'परिचयपत्र अगाडिको फोटो': 'पहचान पत्र का आगे का फोटो', 'परिचयपत्र पछाडिको फोटो': 'पहचान पत्र का पीछे का फोटो', 'मैले दिएको विवरण सत्य हो। म आफ्नो जिम्मेवारी बुझेर Admin आवेदन दिँदैछु र नियम पालना गर्नेछु।': 'मैं पुष्टि करता हूँ कि दी गई जानकारी सही है और मैं नियमों का पालन करूँगा।', 'ऐच्छिक: Admin बन्न चाहनुको कारण लेख्नुहोस्': 'वैकल्पिक: एडमिन बनने का कारण लिखें', 'Admin बन्ने निवेदन': 'एडमिन आवेदन', 'फर्कनुहोस्': 'वापस जाएँ', 'Privacy / गोपनीयता': 'गोपनीयता', 'Lists / सूचीहरू': 'सूचियाँ', 'Notifications / सूचनाहरू': 'सूचनाएँ', 'लोड, बुकिङ र खातासम्बन्धी सूचनाहरू यहाँ हेर्नुहोस्।': 'लोड, बुकिंग और खाते की सूचनाएँ यहाँ देखें।', 'सूचनाहरू हेर्नुहोस्': 'सूचनाएँ देखें', 'Storage and Data / डाटा': 'स्टोरेज और डेटा', 'मोबाइलमा फाइल र डाटा व्यवस्थापन सुविधा पछि जोड्न सकिन्छ।': 'मोबाइल में फ़ाइल और डेटा प्रबंधन सुविधा बाद में जोड़ी जा सकती है।', 'App Language / एपको भाषा': 'ऐप की भाषा', 'Help Center / सहायता केन्द्र': 'सहायता केंद्र', 'समस्याको प्रकार': 'समस्या का प्रकार', 'विषय': 'विषय', 'विवरण / सन्देश': 'विवरण / संदेश', 'समस्या छोटकरीमा लेख्नुहोस्': 'समस्या संक्षेप में लिखें', 'आफ्नो समस्या वा गुनासो लेख्नुहोस्': 'अपनी समस्या या शिकायत लिखें', 'Admin लाई पठाउनुहोस्': 'एडमिन को भेजें', 'मेरा सहायता अनुरोधहरू': 'मेरे सहायता अनुरोध', 'रिफ्रेस गर्नुहोस्': 'रीफ़्रेश करें', 'City / सहर': 'शहर', 'आफ्नो सहर': 'अपना शहर', 'Save City': 'शहर सेव करें', 'Request History / अनुरोध इतिहास': 'अनुरोध इतिहास', 'पूरा भएका ढुवानी': 'पूरी हुई डिलीवरी', 'वास्तविक कमाइ': 'वास्तविक कमाई', 'वास्तविक दूरी': 'वास्तविक दूरी', 'म्यापबाट भएका बुकिङ': 'मैप बुकिंग', 'म्याप बुकिङ इतिहास छैन।': 'मैप बुकिंग का इतिहास नहीं है।', 'उठाउने स्थान:': 'पिकअप स्थान:', 'गन्तव्य:': 'गंतव्य:', 'सामान:': 'सामान:', 'मिति:': 'तारीख:', 'स्थिति:': 'स्थिति:', 'प्रस्तावित भाडा:': 'प्रस्तावित किराया:', 'वास्तविक दूरी र कमाइ: रेकर्ड छैन': 'वास्तविक दूरी और कमाई दर्ज नहीं है', 'बुकिङ तथा ढुवानी': 'बुकिंग और डिलीवरी', 'अहिलेसम्म बुकिङ इतिहास छैन।': 'अभी तक बुकिंग इतिहास नहीं है।', 'वास्तविक दूरी:': 'वास्तविक दूरी:', 'वास्तविक भाडा:': 'वास्तविक किराया:', 'मैले पोस्ट गरेका लोड': 'मेरे पोस्ट किए गए लोड', 'पोस्ट गरेका लोड छैनन्।': 'कोई पोस्ट किया हुआ लोड नहीं है।', 'पोस्ट रद्द गर्नुहोस्': 'पोस्ट रद्द करें', 'फेरि पोस्ट गर्नुहोस्': 'फिर से पोस्ट करें', 'लोड ID:': 'लोड ID:'}, '中文': {'Account / खाता स्थिति': '账户状态', 'हालको भूमिका:': '当前角色：', 'खाता स्थिति:': '账户状态：', 'KYC प्रमाणिकरण:': 'KYC 验证：', 'प्रशासक टिप्पणी:': '管理员备注：', 'KYC विवरण खोल्नुहोस्': '查看 KYC 详情', 'Admin Login / प्रशासक लगइन': '管理员登录', 'Create Admin Account / Admin बन्न आवेदन': '申请管理员账户', 'Forgot Password? / पासवर्ड बिर्सनुभयो?': '忘记密码？', 'Reset Password / नयाँ पासवर्ड राख्नुहोस्': '重置密码', 'पासवर्ड रिसेट इमेलको लिंकबाट यो पेज खोलेपछि नयाँ पासवर्ड राख्नुहोस्।': '通过密码重置邮件中的链接打开此页面后设置新密码。', 'नयाँ पासवर्ड (कम्तीमा 8 अक्षर)': '新密码（至少 8 个字符）', 'नयाँ पासवर्ड फेरि लेख्नुहोस्': '再次输入新密码', 'Change Password / पासवर्ड परिवर्तन': '修改密码', 'Login / लगइन': '登录', 'Admin Account Application / Admin आवेदन': '管理员账户申请', 'आवेदन Root Admin ले जाँच गर्नेछन्। फारम पठाउँदैमा Admin अधिकार प्राप्त हुँदैन।': '申请将由根管理员审核。提交表格并不代表获得管理员权限。', 'परिचयपत्रको प्रकार': '证件类型', 'पासपोर्ट साइज फोटो (अनिवार्य, अगाडिबाट खिचेको)': '证件照（必填）', 'आफ्नो अनुहार स्पष्ट देखिने पासपोर्ट साइज फोटो छान्नुहोस्।': '请选择一张面部清晰的证件照。', 'परिचयपत्र अगाडिको फोटो': '证件正面照片', 'परिचयपत्र पछाडिको फोटो': '证件背面照片', 'मैले दिएको विवरण सत्य हो। म आफ्नो जिम्मेवारी बुझेर Admin आवेदन दिँदैछु र नियम पालना गर्नेछु।': '我确认所提供的信息真实，并理解职责且遵守规则。', 'ऐच्छिक: Admin बन्न चाहनुको कारण लेख्नुहोस्': '选填：请说明申请管理员的原因', 'Admin बन्ने निवेदन': '管理员申请说明', 'फर्कनुहोस्': '返回', 'Privacy / गोपनीयता': '隐私', 'Lists / सूचीहरू': '列表', 'Notifications / सूचनाहरू': '通知', 'लोड, बुकिङ र खातासम्बन्धी सूचनाहरू यहाँ हेर्नुहोस्।': '在此查看货运、预订和账户通知。', 'सूचनाहरू हेर्नुहोस्': '查看通知', 'Storage and Data / डाटा': '存储与数据', 'मोबाइलमा फाइल र डाटा व्यवस्थापन सुविधा पछि जोड्न सकिन्छ।': '移动端文件和数据管理功能可能会在以后添加。', 'App Language / एपको भाषा': '应用语言', 'Help Center / सहायता केन्द्र': '帮助中心', 'समस्याको प्रकार': '问题类型', 'विषय': '主题', 'विवरण / सन्देश': '详情 / 消息', 'समस्या छोटकरीमा लेख्नुहोस्': '简要描述问题', 'आफ्नो समस्या वा गुनासो लेख्नुहोस्': '描述您的问题或投诉', 'Admin लाई पठाउनुहोस्': '发送给管理员', 'मेरा सहायता अनुरोधहरू': '我的支持请求', 'रिफ्रेस गर्नुहोस्': '刷新', 'City / सहर': '城市', 'आफ्नो सहर': '您的城市', 'Save City': '保存城市', 'Request History / अनुरोध इतिहास': '请求历史', 'पूरा भएका ढुवानी': '已完成的运输', 'वास्तविक कमाइ': '实际收入', 'वास्तविक दूरी': '实际距离', 'म्यापबाट भएका बुकिङ': '地图预订', 'म्याप बुकिङ इतिहास छैन।': '没有地图预订记录。', 'उठाउने स्थान:': '取货地点：', 'गन्तव्य:': '目的地：', 'सामान:': '货物：', 'मिति:': '日期：', 'स्थिति:': '状态：', 'प्रस्तावित भाडा:': '报价：', 'वास्तविक दूरी र कमाइ: रेकर्ड छैन': '没有实际距离和收入记录', 'बुकिङ तथा ढुवानी': '预订与运输', 'अहिलेसम्म बुकिङ इतिहास छैन।': '暂无预订记录。', 'वास्तविक दूरी:': '实际距离：', 'वास्तविक भाडा:': '实际运费：', 'मैले पोस्ट गरेका लोड': '我发布的货运', 'पोस्ट गरेका लोड छैनन्।': '没有已发布的货运。', 'पोस्ट रद्द गर्नुहोस्': '取消发布', 'फेरि पोस्ट गर्नुहोस्': '重新发布', 'लोड ID:': '货运 ID：'}};
+const quickTranslations = {
+'English': {'Pending / प्रतीक्षामा':'Pending','KYC Verification:':'KYC Verification:','Admin Login':'Admin Login','Account Deactivate':'Deactivate Account','Delete Account':'Delete Account','Verified':'Verified','Rejected':'Rejected','Pending':'Pending'},
+'हिन्दी': {'Pending / प्रतीक्षामा':'लंबित','KYC Verification:':'KYC सत्यापन:','Admin Login':'एडमिन लॉगिन','Account Deactivate':'खाता निष्क्रिय करें','Delete Account':'खाता हटाएँ','Verified':'सत्यापित','Rejected':'अस्वीकृत','Pending':'लंबित'},
+'中文': {'Pending / प्रतीक्षामा':'待处理','KYC Verification:':'KYC 验证：','Admin Login':'管理员登录','Account Deactivate':'停用账户','Delete Account':'删除账户','Verified':'已验证','Rejected':'已拒绝','Pending':'待处理'}
+};
+const tr = (text) => quickTranslations[language]?.[text] || featureTranslations[language]?.[text] || translations[language]?.[text] || extraTranslations[language]?.[text] || finalTranslations[language]?.[text] || text;
 
   const floatingBack = {
     position: 'fixed', right: 18, bottom: 18, zIndex: 9999,
@@ -975,7 +1337,7 @@ const tr = (text) => featureTranslations[language]?.[text] || translations[langu
 
 
   const go = (p) => {
-    if (authStep === 'complete' && role && !isAppAdmin && kycCheckComplete && accountKycStatus !== 'स्वीकृत (Approved)' && !['kyc', 'kyc-pending'].includes(p)) {
+    if (authStep === 'complete' && role && !isAppAdmin && !isDemoAccount && kycCheckComplete && accountKycStatus !== 'स्वीकृत (Approved)' && !['kyc', 'kyc-pending'].includes(p)) {
       setPage(accountKycStatus === 'प्रतीक्षामा (Pending)' ? 'kyc-pending' : 'kyc');
       setMessage('पहिले KYC प्रमाणिकरण पूरा गर्नुहोस्।');
       return;
@@ -986,26 +1348,121 @@ const tr = (text) => featureTranslations[language]?.[text] || translations[langu
     setMessage('');
   };
 
-  const goBack = () => {
-    if (page === 'kyc' || page === 'kyc-pending') {
-      localStorage.removeItem('load_role');
-      setRole('');
-      setNavHistory([]);
+  const goBack = async () => {
+    if (page === 'kyc') {
+      setMessage('KYC फारम पूरा नगरी बाहिर ननिस्कनुहोस्।');
+      return;
+    }
+    if (page === 'kyc-pending') {
       setPage('home');
       setMessage('');
       return;
+    }
+    if (welcomeAction && authStep === 'otp') {
+      setAuthStep('details');
+      setAuthMessage('');
+      setOtp('');
+      return;
+    }
+    if (authStep === 'complete' && !role && !isAppAdmin && page === 'home') {
+      localStorage.removeItem('load_role');
+      setRole('');
+      setWelcomeAction('login');
+      setAuthStep('details');
+      setAuthMessage('');
+      setNavHistory([]);
+      setMessage('');
+      return;
+    }
+    if (page === 'home' && authStep === 'complete' && role && !isAppAdmin) {
+      try {
+        const { data: auth } = await supabase.auth.getUser();
+        if (auth?.user) {
+          const { data: approvedRows, error } = await supabase
+            .from('kyc_records')
+            .select('status')
+            .eq('user_id', auth.user.id)
+            .eq('status', 'approved')
+            .limit(1);
+          if (!error && approvedRows?.length) {
+            localStorage.removeItem('load_role');
+            setRole('');
+            setNavHistory([]);
+            setMessage('');
+            return;
+          }
+        }
+      } catch (err) {
+        console.error('KYC Back check:', err);
+      }
     }
     if (navHistory.length > 0) {
       setPage(navHistory[navHistory.length - 1]);
       setNavHistory(prev => prev.slice(0, -1));
       setMessage('');
-    } else if (page !== 'home') {
-      setPage('home');
-    } else {
-      setRole('');
-      setAuthStep('complete');
+      return;
     }
+    if (page !== 'home') {
+      setPage('home');
+      setMessage('');
+      return;
+    }
+    if (authStep === 'complete') {
+      if (accountKycStatus === 'स्वीकृत (Approved)' && role && !isAppAdmin) {
+        localStorage.removeItem('load_role');
+        setRole('');
+        setMessage('');
+        return;
+      }
+      setRole('');
+      setWelcomeAction('');
+      setAuthStep('details');
+      setMessage('');
+      return;
+    }
+    if (welcomeAction) {
+      setWelcomeAction('');
+      setAuthMessage('');
+      return;
+    }
+    if (Capacitor.isNativePlatform()) CapApp.exitApp();
   };
+  const renderBackButton = () => (
+    <button type="button" aria-label="पछाडि फर्कनुहोस्" onClick={goBack}
+      style={floatingBack}>‹</button>
+  );
+
+  useEffect(() => {
+    if (!Capacitor.isNativePlatform()) return;
+    let active = true;
+    let backListener;
+    CapApp.addListener('backButton', () => {
+      if (page === 'kyc') return;
+      goBack();
+    }).then(listener => {
+      if (active) backListener = listener;
+      else listener.remove();
+    });
+    return () => {
+      active = false;
+      backListener?.remove();
+    };
+  }, [page, navHistory, authStep, role, welcomeAction]);
+
+  useEffect(() => {
+    if (Capacitor.isNativePlatform()) return;
+    window.history.pushState({ loadMitra: true }, '', window.location.href);
+  }, []);
+
+  useEffect(() => {
+    if (Capacitor.isNativePlatform()) return;
+    const handleBrowserBack = () => {
+      goBack();
+      window.history.pushState({ loadMitra: true }, '', window.location.href);
+    };
+    window.addEventListener('popstate', handleBrowserBack);
+    return () => window.removeEventListener('popstate', handleBrowserBack);
+  }, [page, navHistory, authStep, role, welcomeAction]);
 
   const logout = async () => {
     const { error } = await supabase.auth.signOut();
@@ -1302,11 +1759,12 @@ const tr = (text) => featureTranslations[language]?.[text] || translations[langu
 
   if (showResetPassword && page !== 'admin-application') return (
     <div style={{maxWidth:480,margin:'40px auto',padding:24,fontFamily:'Arial,sans-serif'}}>
+      {renderBackButton()}
       <h2>नयाँ पासवर्ड राख्नुहोस्</h2>
       <p>नयाँ पासवर्ड कम्तीमा 8 अक्षरको राख्नुहोस्।</p>
       <input type="password" autoComplete="new-password" placeholder="नयाँ पासवर्ड" value={newAdminPassword} onChange={e => setNewAdminPassword(e.target.value)} style={{display:'block',width:'100%',boxSizing:'border-box',padding:12,margin:'12px 0'}} />
       <input type="password" autoComplete="new-password" placeholder="पासवर्ड फेरि लेख्नुहोस्" value={confirmAdminPassword} onChange={e => setConfirmAdminPassword(e.target.value)} style={{display:'block',width:'100%',boxSizing:'border-box',padding:12,margin:'12px 0'}} />
-      <button type="button" className="primary" style={{display:'block',width:'100%',margin:'10px 0'}} onClick={() => {setAdminApplicationMessage('');setMainMenuOpen(false);setPage('admin-application');setForm({});setMessage('');}}>Create Admin Account / Admin बन्न आवेदन</button>
+      <button type="button" className="primary" style={{display:'block',width:'100%',margin:'10px 0'}} onClick={() => {setAdminApplicationMessage('');setMainMenuOpen(false);setPage('admin-application');setForm({});setMessage('');}}>{tr('Create Admin Account / Admin बन्न आवेदन' )}</button>
             <button type="button" onClick={async () => {
         setResetPasswordMessage('');
         if (newAdminPassword.length < 8) { setResetPasswordMessage('पासवर्ड कम्तीमा 8 अक्षरको हुनुपर्छ।'); return; }
@@ -1322,18 +1780,20 @@ const tr = (text) => featureTranslations[language]?.[text] || translations[langu
   if (authStep === 'complete' && role && !isAppAdmin &&
       !kycCheckComplete && page !== 'admin-application' && !page.startsWith('settings-admin')) return (
     <div style={{minHeight:'100vh',display:'grid',placeItems:'center',padding:24,textAlign:'center'}}>
+      {renderBackButton()}
       <div><div style={{fontSize:42}}>🔐</div><h3>KYC स्थिति जाँच हुँदैछ</h3><p>कृपया केही समय प्रतीक्षा गर्नुहोस्।</p></div>
     </div>
   );
 
   if (page !== 'admin-application' && !role && !welcomeAction && authStep !== 'complete') return (
     <div style={{minHeight:'100vh',boxSizing:'border-box',background:'linear-gradient(155deg,#0B192C,#173e5e)',color:'white',padding:'24px 22px',fontFamily:'Arial,sans-serif',maxWidth:600,margin:'auto',display:'flex',flexDirection:'column'}}>
+      {renderBackButton()}
       <div style={{display:'flex',justifyContent:'space-between',alignItems:'center'}}>
         <div style={{display:'flex',alignItems:'center',gap:10}}>
           <div style={{background:'#FF6500',color:'#fff',borderRadius:13,padding:'13px 11px',fontWeight:900,fontSize:22}}>LM</div>
           <div>
             <div style={{fontSize:23,fontWeight:900}}>LoadMitra</div>
-            <div style={{fontSize:10,letterSpacing:1.5,color:'#dce7f2',marginTop:4}}>LM LOGISTICS & CARGO</div>
+            <div style={{fontSize:10,letterSpacing:1.5,color:'#dce7f2',marginTop:4}}>LoadMitra Logistics</div>
           </div>
         </div>
         <div style={{position:'relative'}}>
@@ -1347,19 +1807,28 @@ const tr = (text) => featureTranslations[language]?.[text] || translations[langu
         <div style={{fontSize:58,textAlign:'center',marginBottom:18}}>🚚</div>
         <h1 style={{fontSize:32,textAlign:'center',margin:'0 0 12px',fontWeight:900}}>LoadMitra</h1>
         <p style={{fontSize:17,textAlign:'center',color:'#FF6500',fontWeight:800,letterSpacing:.5,margin:'0 0 12px'}}>Move More. Move Smarter.</p>
-        <p style={{fontSize:14,textAlign:'center',color:'#dce7f2',margin:'0 0 30px'}}>LM LOGISTICS & CARGO</p>
-        <button onClick={() => {setWelcomeAction('signup');setAuthStep('details');setAuthMessage('');}} style={{width:'100%',padding:16,border:0,borderRadius:12,background:'#FF6500',color:'white',fontSize:17,fontWeight:800,marginBottom:12}}>Create Account / खाता खोल्नुहोस्</button>
-        <button onClick={() => {setWelcomeAction('login');setAuthStep('details');setAuthMessage('');}} style={{width:'100%',padding:15,border:'1px solid #ffffff70',borderRadius:12,background:'transparent',color:'white',fontSize:16,fontWeight:700,marginBottom:18}}>Login / लगइन</button>
+        <p style={{fontSize:14,textAlign:'center',color:'#dce7f2',margin:'0 0 30px'}}>LoadMitra Logistics</p>
+        <label style={{display:'block',fontWeight:700,marginBottom:12}}>Email Address / ID
+          <input type="email" autoComplete="username" value={email} onChange={e=>setEmail(e.target.value)} placeholder="you@example.com" style={{display:'block',width:'100%',boxSizing:'border-box',padding:15,marginTop:8,border:'1px solid #ffffff70',borderRadius:12,fontSize:16}} />
+        </label>
+        <label style={{display:'block',fontWeight:700,marginBottom:6}}>Password
+          <input type={showPassword?'text':'password'} autoComplete="current-password" value={password} onChange={e=>setPassword(e.target.value)} placeholder="आफ्नो Password लेख्नुहोस्" style={{display:'block',width:'100%',boxSizing:'border-box',padding:15,marginTop:8,border:'1px solid #ffffff70',borderRadius:12,fontSize:16}} />
+        </label>
+        <div style={{textAlign:'right',marginBottom:16}}>
+          <button type="button" onClick={async()=>{if(!email.trim()||!email.includes('@')){setAuthMessage('पहिले आफ्नो Email लेख्नुहोस्।');return;}setAuthMessage('Password Reset Link पठाउँदैछ...');const {error}=await supabase.auth.resetPasswordForEmail(email.trim(),{redirectTo:Capacitor.isNativePlatform()?'com.load.logistics://login-callback':window.location.origin});setAuthMessage(error?'Reset Link पठाउन सकिएन: '+error.message:'Email मा Password Reset Link पठाइएको छ।');}} style={{border:0,background:'transparent',color:'#ffb15b',fontWeight:700}}>Forgot Password?</button>
+        </div>
+        <button type="button" onClick={async()=>{if(!email.trim()||!email.includes('@')||!password){setAuthMessage('Email र Password दुवै भर्नुहोस्।');return;}setAuthMessage('Login हुँदैछ...');const {error}=await supabase.auth.signInWithPassword({email:email.trim(),password});setAuthMessage(error?'Login भएन: '+error.message:'Login सफल भयो।');}} style={{width:'100%',padding:16,border:0,borderRadius:12,background:'#FF6500',color:'white',fontSize:17,fontWeight:800,marginBottom:14}}>Login / लगइन</button>
         <div style={{display:'flex',alignItems:'center',gap:12,margin:'0 0 14px',color:'#dce7f2',fontSize:12}}>
           <div style={{height:1,background:'#ffffff45',flex:1}}></div><span>वा Google प्रयोग गर्नुहोस्</span><div style={{height:1,background:'#ffffff45',flex:1}}></div>
         </div>
-        <button type="button" onClick={async () => {const {data,error}=await supabase.auth.signInWithOAuth({provider:'google',options:{redirectTo:Capacitor.isNativePlatform()?'com.load.logistics://login-callback':window.location.origin,skipBrowserRedirect:Capacitor.isNativePlatform()}});if(error)setAuthMessage('Google Login समस्या: '+error.message);else if(data?.url)await Browser.open({url:data.url});}} style={{width:'100%',padding:15,border:'1px solid #ffffff60',borderRadius:12,background:'#fff',color:'#102b46',fontSize:16,fontWeight:700}}>Google बाट लगइन गर्नुहोस्</button>
+        <button type="button" onClick={async()=>{const {data,error}=await supabase.auth.signInWithOAuth({provider:'google',options:{redirectTo:Capacitor.isNativePlatform()?'com.load.logistics://login-callback':window.location.origin,skipBrowserRedirect:Capacitor.isNativePlatform()}});if(error)setAuthMessage('Google Login समस्या: '+error.message);else if(data?.url)await Browser.open({url:data.url});}} style={{width:'100%',padding:15,border:'1px solid #ffffff60',borderRadius:12,background:'#fff',color:'#102b46',fontSize:16,fontWeight:700}}>Google बाट लगइन गर्नुहोस्</button>
+        <button type="button" onClick={()=>{setWelcomeAction('signup');setAuthStep('details');setAuthMessage('');}} style={{width:'100%',padding:14,marginTop:16,border:'1px solid #ffffff70',borderRadius:12,background:'transparent',color:'white',fontSize:16,fontWeight:700}}>Create Account / खाता खोल्नुहोस्</button>
         {authMessage && <p style={{color:'#ffd6a8',fontSize:13,textAlign:'center'}}>{authMessage}</p>}
       </div>
     </div>
   );
 
-  if (page !== 'admin-application' && !role && authStep === 'complete') return (
+  if (page !== 'admin-application' && !role && !isAppAdmin && authStep === 'complete') return (
 
     <div style={{
       minHeight:'100vh', boxSizing:'border-box',
@@ -1368,15 +1837,16 @@ const tr = (text) => featureTranslations[language]?.[text] || translations[langu
       fontFamily:'Arial,sans-serif',
       maxWidth:600, margin:'auto'
     }}>
+      {renderBackButton()}
       <div style={{
         width:64,height:64,borderRadius:18,
         background:'#f28c28',color:'#102b46',
         display:'grid',placeItems:'center',
         fontSize:25,fontWeight:900,marginBottom:20
       }}>LM</div>
-      <h1 style={{fontSize:28,marginBottom:8}}>Load</h1>
+      <h1 style={{fontSize:28,marginBottom:8}}>LoadMitra</h1>
       <p style={{color:'#ffb15b',letterSpacing:2,fontSize:12}}>
-        LM LOGISTICS & CARGO
+        LoadMitra Logistics
       </p>
         <div style={{position:'relative',marginLeft:'auto'}}>
           <button type="button" aria-label="भाषा छान्नुहोस्"
@@ -1453,101 +1923,85 @@ const tr = (text) => featureTranslations[language]?.[text] || translations[langu
 
 
   if (welcomeAction && authStep !== 'complete' && page !== 'admin-application') return (
-    <div style={{
-      minHeight:'100vh',boxSizing:'border-box',
-      background:'#f1f5fa',padding:'26px 20px',
-      fontFamily:'Arial,sans-serif',maxWidth:600,margin:'auto',
-      color:'#102b46'
-    }}>
-      <div style={{
-        background:'#102b46',color:'white',padding:22,
-        borderRadius:18,marginBottom:24
-      }}>
-        <div style={{fontSize:28,fontWeight:900}}>LM · Load</div>
-        <div style={{color:'#ffb15b',fontSize:12,marginTop:6}}>
-          LOGISTICS & CARGO
-        </div>
+    <div style={{minHeight:'100vh',boxSizing:'border-box',background:'#f1f5fa',padding:'26px 20px',fontFamily:'Arial,sans-serif',maxWidth:600,margin:'auto',color:'#102b46'}}>
+      {renderBackButton()}
+      <div style={{background:'#102b46',color:'white',padding:22,borderRadius:18,marginBottom:24}}>
+        <div style={{fontSize:28,fontWeight:900}}>LoadMitra</div>
+        <div style={{color:'#ffb15b',fontSize:12,marginTop:6}}>LOGISTICS & CARGO</div>
       </div>
-      <h2>{authStep === 'details' ? (welcomeAction === 'login' ? 'लगइन गर्नुहोस्' : 'खाता खोल्नुहोस्') : 'OTP प्रमाणीकरण'}</h2>
-      {role && <p style={{color:'#64748b',lineHeight:1.6}}>छानिएको भूमिका: {role}</p>}
+
+      <h2>{authStep === 'details' ? 'खाता खोल्नुहोस्' : 'Email OTP प्रमाणीकरण'}</h2>
+      {role && <p style={{color:'#64748b'}}>छानिएको भूमिका: {role}</p>}
 
       {authStep === 'details' ? <>
-        <button type="button"
-          onClick={async () => {
-            localStorage.setItem('load_role', role);
-            const { data, error } = await supabase.auth.signInWithOAuth({
-              provider: 'google',
-              options: { redirectTo: Capacitor.isNativePlatform() ? 'com.load.logistics://login-callback' : window.location.origin, skipBrowserRedirect: Capacitor.isNativePlatform() }
-            });
-            if (error) setAuthMessage('Google Login समस्या: ' + error.message);
-            else if (data?.url) await Browser.open({ url: data.url });
-          }}
-          style={{display:'block',width:'100%',padding:15,margin:'12px 0',
-            border:'1px solid #cbd5e1',borderRadius:10,background:'#fff',
-            color:'#102b46',fontSize:16,fontWeight:700}}>
-          Google बाट लगइन गर्नुहोस्
-        </button>
-        {authMessage && <p>{authMessage}</p>}
+        <label style={{display:'block',marginTop:14,fontWeight:700}}>पूरा नाम
+          <input value={fullName} onChange={e=>setFullName(e.target.value)} placeholder="तपाईंको पूरा नाम" style={{display:'block',width:'100%',boxSizing:'border-box',padding:14,marginTop:7,border:'1px solid #cbd5e1',borderRadius:10,fontSize:16}} />
+        </label>
+        <label style={{display:'block',marginTop:14,fontWeight:700}}>ठेगाना
+          <input value={signupAddress} onChange={e=>setSignupAddress(e.target.value)} placeholder="स्थायी वा हालको ठेगाना" style={{display:'block',width:'100%',boxSizing:'border-box',padding:14,marginTop:7,border:'1px solid #cbd5e1',borderRadius:10,fontSize:16}} />
+        </label>
+        <label style={{display:'block',marginTop:14,fontWeight:700}}>फोन नम्बर
+          <input type="tel" value={phone} onChange={e=>setPhone(e.target.value)} placeholder="+977 98XXXXXXXX" style={{display:'block',width:'100%',boxSizing:'border-box',padding:14,marginTop:7,border:'1px solid #cbd5e1',borderRadius:10,fontSize:16}} />
+        </label>
+        <label style={{display:'block',marginTop:14,fontWeight:700}}>Email Address
+          <input type="email" value={email} onChange={e=>setEmail(e.target.value)} placeholder="you@example.com" autoComplete="email" style={{display:'block',width:'100%',boxSizing:'border-box',padding:14,marginTop:7,border:'1px solid #cbd5e1',borderRadius:10,fontSize:16}} />
+        </label>
+        <label style={{display:'block',marginTop:14,fontWeight:700}}>Password
+          <input type="password" value={password} onChange={e=>setPassword(e.target.value)} placeholder="कम्तीमा ८ अक्षर" autoComplete="new-password" style={{display:'block',width:'100%',boxSizing:'border-box',padding:14,marginTop:7,border:'1px solid #cbd5e1',borderRadius:10,fontSize:16}} />
+        </label>
+        <label style={{display:'block',marginTop:14,fontWeight:700}}>Confirm Password
+          <input type="password" value={confirmPassword} onChange={e=>setConfirmPassword(e.target.value)} placeholder="Password फेरि लेख्नुहोस्" autoComplete="new-password" style={{display:'block',width:'100%',boxSizing:'border-box',padding:14,marginTop:7,border:'1px solid #cbd5e1',borderRadius:10,fontSize:16}} />
+        </label>
 
-        <label style={{display:'block',marginTop:22,fontWeight:700}}>
-          मोबाइल नम्बर
-          <input type="tel" value={phone}
-            onChange={e => setPhone(e.target.value)}
-            placeholder="+977 98XXXXXXXX"
-            style={{display:'block',width:'100%',boxSizing:'border-box',
-              padding:15,marginTop:8,border:'1px solid #cbd5e1',
-              borderRadius:10,fontSize:16}} />
-        </label>
-        <label style={{display:'block',marginTop:18,fontWeight:700}}>
-          इमेल ठेगाना
-          <input type="email" value={email}
-            onChange={e => setEmail(e.target.value)}
-            placeholder="you@example.com"
-            style={{display:'block',width:'100%',boxSizing:'border-box',
-              padding:15,marginTop:8,border:'1px solid #cbd5e1',
-              borderRadius:10,fontSize:16}} />
-        </label>
-        <button onClick={() => {
-          if (!phone.trim() || !email.trim() || !email.includes('@')) {
-            setAuthMessage('सही मोबाइल नम्बर र इमेल दुवै भर्नुहोस्।');
-            return;
+        <button type="button" onClick={async()=>{
+          if(!fullName.trim()||!signupAddress.trim()||!phone.trim()||!email.trim()||!email.includes('@')||!password||!confirmPassword){
+            setAuthMessage('सबै विवरण सही तरिकाले भर्नुहोस्।'); return;
           }
-          setAuthMessage('OTP पठाउँदैछ...'); supabase.auth.signInWithOtp({ email: email.trim(), options: { shouldCreateUser: true } }).then(({ error }) => { if (error) setAuthMessage('OTP पठाउन सकिएन: ' + error.message); else { setAuthStep('otp'); setAuthMessage('तपाईंको इमेलमा OTP पठाइएको छ।'); } });
-        }} style={{
-          width:'100%',padding:16,marginTop:24,border:0,
-          borderRadius:12,background:'#f28c28',
-          color:'#102b46',fontSize:16,fontWeight:700
-        }}>OTP प्रमाणीकरण सुरु गर्नुहोस्</button>
-      </> : <>
-        <p>तपाईंको मोबाइल र इमेलमा आएको ६ अङ्कको OTP यहाँ राख्नुहोस्।</p>
-        <input value={otp} maxLength={6} inputMode="numeric"
-          onChange={e => setOtp(e.target.value.replace(/\D/g,''))}
-          placeholder="६ अङ्कको OTP"
-          style={{width:'100%',boxSizing:'border-box',padding:16,
-            border:'1px solid #cbd5e1',borderRadius:10,fontSize:20}} />
-        <button onClick={() => {
-          if (otp.length !== 6) { setAuthMessage('६ अङ्कको OTP राख्नुहोस्।'); return; }
-          setAuthMessage('OTP प्रमाणित गर्दैछ...');
-          supabase.auth.verifyOtp({ email: email.trim(), token: otp, type: 'email' }).then(({ error }) => {
-            if (error) setAuthMessage('OTP प्रमाणित भएन: ' + error.message);
-            else { setAuthStep('complete'); setAuthMessage('इमेल प्रमाणित भयो।'); }
+          if(password.length<8){setAuthMessage('Password कम्तीमा ८ अक्षरको हुनुपर्छ।');return;}
+          if(password!==confirmPassword){setAuthMessage('दुवै Password मिलेनन्।');return;}
+          setAuthMessage('Email OTP पठाउँदैछ...');
+          const {data,error}=await supabase.auth.signUp({
+            email:email.trim(),
+            password,
+            options:{data:{full_name:fullName.trim(),address:signupAddress.trim(),phone:phone.trim()}}
           });
-        }} style={{width:'100%',padding:16,marginTop:12,border:0,borderRadius:12,background:'#f28c28',color:'#102b46',fontSize:16,fontWeight:700}}>OTP प्रमाणित गर्नुहोस्</button>
+          if(error){setAuthMessage('खाता बनाउन सकिएन: '+error.message);return;}
+          if(data?.user?.identities?.length===0){setAuthMessage('यो Email पहिले नै दर्ता छ। Login गर्नुहोस्।');return;}
+          if(data?.session){setAuthStep('complete');setAuthMessage('खाता सफलतापूर्वक बन्यो।');}
+          else{setAuthStep('otp');setAuthMessage('तपाईंको Email मा ६ अङ्कको OTP पठाइएको छ।');}
+        }} style={{width:'100%',padding:16,marginTop:24,border:0,borderRadius:12,background:'#f28c28',color:'#102b46',fontSize:16,fontWeight:700}}>
+          Email OTP पठाउनुहोस्
+        </button>
+      </> : <>
+        <p>तपाईंको Email मा आएको ६ अङ्कको OTP राख्नुहोस्।</p>
+        <input value={otp} maxLength={6} inputMode="numeric" onChange={e=>setOtp(e.target.value.replace(/\D/g,''))} placeholder="६ अङ्कको OTP" style={{width:'100%',boxSizing:'border-box',padding:16,border:'1px solid #cbd5e1',borderRadius:10,fontSize:20}} />
+        <button type="button" onClick={async()=>{
+          if(otp.length!==6){setAuthMessage('६ अङ्कको OTP राख्नुहोस्।');return;}
+          setAuthMessage('OTP प्रमाणित गर्दैछ...');
+          const {error}=await supabase.auth.verifyOtp({email:email.trim(),token:otp,type:'signup'});
+          if(error){setAuthMessage('OTP प्रमाणित भएन: '+error.message);return;}
+          const {data:userData}=await supabase.auth.getUser();
+          const user=userData?.user;
+          if(user){
+            const {error:profileError}=await supabase.from('load_profiles').upsert({
+              user_id:user.id,
+              display_name:fullName.trim(),
+              phone:phone.trim(),
+              email:email.trim(),
+              account_status:'active',
+              updated_at:new Date().toISOString()
+            },{onConflict:'user_id'});
+            if(profileError){setAuthMessage('Email प्रमाणित भयो, तर प्रोफाइल सुरक्षित गर्न समस्या आयो: '+profileError.message);return;}
+          }
+          setAuthStep('complete');
+          setAuthMessage('Email प्रमाणित भयो। खाता तयार भयो।');
+        }} style={{width:'100%',padding:16,marginTop:12,border:0,borderRadius:12,background:'#f28c28',color:'#102b46',fontSize:16,fontWeight:700}}>
+          OTP प्रमाणित गर्नुहोस्
+        </button>
       </>}
-      {authMessage && <p style={{
-        background:'#fff1db',padding:13,borderRadius:10,
-        lineHeight:1.6,fontSize:13
-      }}>{authMessage}</p>}
-      <button onClick={() => {
-        setRole('');
-        setWelcomeAction('');
-        setAuthStep('details');
-        setAuthMessage('');
-      }} style={{
-        width:'100%',padding:14,marginTop:16,
-        border:'1px solid #cbd5e1',borderRadius:12,
-        background:'white',fontWeight:700
-      }}>← पछाडि</button>
+
+      {authMessage && <p style={{background:'#fff1db',padding:13,borderRadius:10,lineHeight:1.6,fontSize:13}}>{authMessage}</p>}
+      <button onClick={goBack} style={{width:'100%',padding:14,marginTop:16,border:'1px solid #cbd5e1',borderRadius:12,background:'white',fontWeight:700}}>← पछाडि</button>
     </div>
   );
 
@@ -1705,7 +2159,7 @@ const tr = (text) => featureTranslations[language]?.[text] || translations[langu
   const requireApprovedKyc = async (userId) => {
     const { data: rows, error } = await supabase
       .from('kyc_records')
-      .select('status, created_at')
+      .select('id, status, created_at, photo_path, document_path, document_back_path')
       .eq('user_id', userId)
       .order('created_at', { ascending: false })
       .limit(1);
@@ -1735,6 +2189,60 @@ const tr = (text) => featureTranslations[language]?.[text] || translations[langu
     }
   };
 
+
+  const decideVehicleBookingRequest = async (request, accept) => {
+    try {
+      const { data: auth, error: authError } = await supabase.auth.getUser();
+      if (authError || !auth?.user) throw new Error('पहिले लगइन गर्नुहोस्।');
+      if (auth.user.id !== request.vehicle_owner_id) {
+        throw new Error('यो अनुरोधको निर्णय गर्ने अनुमति तपाईंलाई छैन।');
+      }
+      if (request.status !== 'pending') {
+        throw new Error('यो अनुरोधमा निर्णय भइसकेको छ।');
+      }
+
+      if (accept) {
+        const { data: existing, error: checkError } = await supabase
+          .from('vehicle_booking_requests')
+          .select('id')
+          .eq('vehicle_owner_id', auth.user.id)
+          .eq('status', 'accepted')
+          .limit(1);
+        if (checkError) throw checkError;
+        if (existing?.length) throw new Error('तपाईंको अर्को अनुरोध पहिले नै स्वीकार भएको छ।');
+      }
+
+      const { data, error } = await supabase
+        .from('vehicle_booking_requests')
+        .update({ status: accept ? 'accepted' : 'rejected' })
+        .eq('id', request.id)
+        .eq('vehicle_owner_id', auth.user.id)
+        .eq('status', 'pending')
+        .select('id,status')
+        .maybeSingle();
+
+      if (error) throw error;
+      if (!data) throw new Error('अनुरोध अपडेट भएन। फेरि रिफ्रेस गर्नुहोस्।');
+
+      setVehicleBookings(prev => prev.map(r =>
+        r.id === request.id ? { ...r, status: data.status } : r
+      ));
+
+      const { error: noticeError } = await supabase.from('load_notifications').insert({
+        user_id: request.requester_id,
+        type: accept ? 'vehicle_booking_accepted' : 'vehicle_booking_rejected',
+        title_key: accept ? 'बुकिङ स्वीकार भयो' : 'बुकिङ अस्वीकार भयो',
+        body_key: accept ? 'तपाईंको गाडी बुकिङ अनुरोध स्वीकार भएको छ।' : 'तपाईंको गाडी बुकिङ अनुरोध अस्वीकार भएको छ।',
+        booking_id: null
+      });
+
+      setMessage(accept
+        ? (noticeError ? 'बुकिङ स्वीकार भयो, तर सूचना पठाउन सकिएन।' : 'बुकिङ स्वीकार भयो।')
+        : (noticeError ? 'बुकिङ अस्वीकार भयो, तर सूचना पठाउन सकिएन।' : 'बुकिङ अस्वीकार भयो।'));
+    } catch (err) {
+      setMessage('निर्णय भएन: ' + (err.message || 'फेरि प्रयास गर्नुहोस्।'));
+    }
+  };
 
   const decideLoadBooking = async (booking, accept) => {
     try {
@@ -1791,6 +2299,7 @@ const tr = (text) => featureTranslations[language]?.[text] || translations[langu
       }
 
       if (page === 'loads' || page === 'truck') {
+        if (auth.user.email?.toLowerCase() === 'linuxk082@gmail.com') throw new Error('Demo गाडी परीक्षणका लागि मात्र हो; वास्तविक पोस्ट गर्न मिल्दैन।');
         await requireApprovedKyc(auth.user.id);
 
         if (!providerVehicle.number || !providerVehicle.type) {
@@ -1876,8 +2385,64 @@ const tr = (text) => featureTranslations[language]?.[text] || translations[langu
     }
   };
 
+  const openKycEdit = async () => {
+    try {
+      setMessage('KYC विवरण लोड हुँदैछ...');
+      const { data: auth, error: authError } = await supabase.auth.getUser();
+      if (authError || !auth.user) throw new Error('पहिले लगइन गर्नुहोस्।');
+      const { data: rows, error } = await supabase.from('kyc_records')
+        .select('*').eq('user_id', auth.user.id)
+        .order('created_at', {ascending:false}).limit(1);
+      if (error) throw error;
+      const k = rows?.[0];
+      if (!k) {
+        setKycEditMode(false);
+        setExistingKycFiles({photo_path:'',document_path:'',document_back_path:''});
+        setExistingKycDocs([]);
+        setForm({});
+        setPage('kyc');
+        setMessage('');
+        return;
+      }
+      const { data: docs, error: docsError } = await supabase.from('kyc_documents')
+        .select('*').eq('kyc_record_id', k.id);
+      if (docsError) throw docsError;
+      const merged = {
+        full_name:k.full_name || '', phone:k.phone || '',
+        address_province:k.address_province || '', address_district:k.address_district || '',
+        address_local_level:k.address_local_level || '', address_ward:k.address_ward || '',
+        address_tole:k.address_tole || '', document_type:k.document_type || 'citizenship',
+        document_number:k.document_number || ''
+      };
+      const keyMap = {
+        driver_license:{holder_name:'driver_license_name',number:'driver_license_number',license_class:'driver_license_class',issue_date:'driver_license_issue_date',expiry_date:'driver_license_expiry_date'},
+        vehicle_bluebook:{vehicle_number:'vehicle_number',bluebook_number:'bluebook_number',owner_name:'bluebook_owner_name',issue_date:'bluebook_issue_date',renewal_date:'bluebook_renewal_date',expiry_date:'bluebook_expiry_date',vehicle_type:'vehicle_type',load_capacity:'load_capacity',capacity_unit:'capacity_unit',vehicle_length:'vehicle_length'},
+        vehicle_insurance:{company_name:'insurance_company',policy_number:'insurance_policy_number',insured_date:'insurance_start_date',expiry_date:'insurance_expiry_date'},
+        company_registration:{company_name:'company_name',registration_number:'company_registration_number',issue_date:'company_issue_date',expiry_date:'company_expiry_date'},
+        business_registration:{business_name:'business_name',business_type:'business_type',business_address:'business_address',representative_name:'business_representative_name',representative_position:'business_representative_position',registration_number:'business_registration_number',pan_vat_number:'business_pan_vat_number',goods_type:'business_goods_type'},
+        business_pan:{business_name:'business_name',business_type:'business_type',business_address:'business_address',representative_name:'business_representative_name',representative_position:'business_representative_position',registration_number:'business_registration_number',pan_vat_number:'business_pan_vat_number',goods_type:'business_goods_type'}
+      };
+      (docs || []).forEach(d => Object.entries(keyMap[d.document_kind] || {}).forEach(([a,b]) => {
+        if (d.details?.[a] !== undefined && merged[b] === undefined) merged[b] = d.details[a];
+      }));
+      setForm(merged);
+      setExistingKycFiles({photo_path:k.photo_path || '',document_path:k.document_path || '',document_back_path:k.document_back_path || ''});
+      setExistingKycDocs(docs || []);
+      const rt = k.role_type || localStorage.getItem('load_role_type') || '';
+      setRoleType(rt);
+      if (k.role_type) localStorage.setItem('load_role_type', k.role_type);
+      if (k.role_category) localStorage.setItem('load_role_category', k.role_category);
+      setKycEditMode(true);
+      setPage('kyc');
+      setMessage('');
+    } catch (err) {
+      setMessage('KYC विवरण खोल्न सकिएन: ' + (err.message || 'त्रुटि'));
+    }
+  };
+
   const saveKyc = async (e) => {
     e.preventDefault();
+    let kycStage = 'लगइन जाँच';
     try {
       const { data: auth, error: authError } = await supabase.auth.getUser();
       if (authError || !auth.user) {
@@ -1886,38 +2451,46 @@ const tr = (text) => featureTranslations[language]?.[text] || translations[langu
       }
       const { data: previousKyc, error: previousKycError } = await supabase
         .from('kyc_records')
-        .select('status, created_at')
+        .select('id, status, created_at, photo_path, document_path, document_back_path')
         .eq('user_id', auth.user.id)
         .order('created_at', { ascending: false })
         .limit(1);
       if (previousKycError) throw previousKycError;
-      if (previousKyc?.[0]?.status === 'approved') {
+      if (!kycEditMode && previousKyc?.[0]?.status === 'approved') {
         setMessage('तपाईंको KYC पहिले नै स्वीकृत छ। फेरि भर्नुपर्दैन।');
         return;
       }
-      if (previousKyc?.[0]?.status === 'pending') {
+      if (!kycEditMode && previousKyc?.[0]?.status === 'pending') {
         setMessage('तपाईंको KYC Admin जाँचमा छ। निर्णय नआउँदासम्म पर्खनुहोस्।');
         return;
       }
-      if (!form.full_name || !form.phone || !form.address_province || !form.address_district || !form.address_local_level || !form.address_ward || !form.address_tole || !form.document_number || !kycPhotoFile || !kycFrontFile || !kycBackFile) {
+      if (!form.full_name || !form.phone || !form.address_province || !form.address_district || !form.address_local_level || !form.address_ward || !form.address_tole || !form.document_number || (!kycPhotoFile && !existingKycFiles.photo_path) || (!kycFrontFile && !existingKycFiles.document_path) || (!kycBackFile && !existingKycFiles.document_back_path)) {
         setMessage('सबै विवरण, पासपोर्ट साइजको फोटो र कागजातका दुवै फोटो भर्नुहोस्।');
         return;
       }
+      kycStage = 'मुख्य फोटो तथा कागजात अपलोड';
       const stamp = Date.now();
-      const photoPath = auth.user.id + '/' + stamp + '-passport-photo-' + kycPhotoFile.name.replace(/[^a-zA-Z0-9._-]/g, '_');
-      const frontPath = auth.user.id + '/' + stamp + '-front-' + kycFrontFile.name.replace(/[^a-zA-Z0-9._-]/g, '_');
-      const backPath = auth.user.id + '/' + stamp + '-back-' + kycBackFile.name.replace(/[^a-zA-Z0-9._-]/g, '_');
       const bucket = supabase.storage.from('kyc-private');
-      const photoUpload = await bucket.upload(photoPath, kycPhotoFile, { contentType: kycPhotoFile.type, upsert: false });
-      if (photoUpload.error) throw photoUpload.error;
-      const frontUpload = await bucket.upload(frontPath, kycFrontFile, { contentType: kycFrontFile.type, upsert: false });
-      if (frontUpload.error) throw frontUpload.error;
-      const backUpload = await bucket.upload(backPath, kycBackFile, { contentType: kycBackFile.type, upsert: false });
-      if (backUpload.error) {
-        await bucket.remove([photoPath, frontPath]);
-        throw backUpload.error;
+      let photoPath = existingKycFiles.photo_path || previousKyc?.[0]?.photo_path || '';
+      let frontPath = existingKycFiles.document_path || previousKyc?.[0]?.document_path || '';
+      let backPath = existingKycFiles.document_back_path || previousKyc?.[0]?.document_back_path || '';
+      const uploadedMainPaths = [];
+      for (const item of [
+        ['photo', kycPhotoFile, v => photoPath = v],
+        ['front', kycFrontFile, v => frontPath = v],
+        ['back', kycBackFile, v => backPath = v]
+      ]) {
+        const [kind, file, setPath] = item;
+        if (!file) continue;
+        const path = auth.user.id + '/' + stamp + '-' + kind + '-' + file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
+        const upload = await bucket.upload(path, file, {contentType:file.type, upsert:false});
+        if (upload.error) {
+          if (uploadedMainPaths.length) await bucket.remove(uploadedMainPaths);
+          throw upload.error;
+        }
+        uploadedMainPaths.push(path);
+        setPath(path);
       }
-
       const extraDocRows = [];
       const uploadedExtraPaths = [];
       const docMeta = {
@@ -1977,6 +2550,7 @@ const tr = (text) => featureTranslations[language]?.[text] || translations[langu
       };
 
       try {
+        kycStage = 'थप कागजात अपलोड';
         for (const [fileKey, file] of Object.entries(kycExtraDocs)) {
           if (!file) continue;
           const kind = fileKey.startsWith('driver_license_') ? 'driver_license'
@@ -2012,14 +2586,25 @@ const tr = (text) => featureTranslations[language]?.[text] || translations[langu
           });
         }
       } catch (extraUploadError) {
-        await bucket.remove([photoPath, frontPath, backPath, ...uploadedExtraPaths]);
+        await bucket.remove([...uploadedMainPaths, ...uploadedExtraPaths]);
         throw extraUploadError;
       }
 
-      const { data: savedKyc, error } = await supabase.from('kyc_records').insert({
+      kycStage = 'मुख्य KYC विवरण सुरक्षित';
+      const { data: savedKyc, error } = await supabase.from('kyc_records').upsert({
         user_id: auth.user.id,
         role_category: localStorage.getItem('load_role_category') || '',
-        role_type: localStorage.getItem('load_role_type') || '',
+        role_type: roleType || localStorage.getItem('load_role_type') || '',
+        role_details: {
+          vehicle_type: docMeta.vehicle_bluebook.vehicle_type,
+          vehicle_number: docMeta.vehicle_bluebook.vehicle_number,
+          load_capacity: docMeta.vehicle_bluebook.load_capacity
+            ? Number(docMeta.vehicle_bluebook.load_capacity) : null,
+          capacity_unit: docMeta.vehicle_bluebook.capacity_unit,
+          vehicle_length: docMeta.vehicle_bluebook.vehicle_length,
+          business_type: docMeta.business_registration.business_type,
+          goods_type: docMeta.business_registration.goods_type
+        },
         full_name: form.full_name,
         phone: form.phone,
         address_province: form.address_province,
@@ -2033,37 +2618,62 @@ const tr = (text) => featureTranslations[language]?.[text] || translations[langu
         photo_path: photoPath,
         document_path: frontPath,
         document_back_path: backPath,
-        status: 'pending'
-      }).select('id').single();
+        status: 'pending',
+        admin_note: null,
+        updated_at: new Date().toISOString()
+      }, { onConflict: 'user_id' }).select('id').single();
 
       if (error) {
-        await bucket.remove([photoPath, frontPath, backPath, ...extraDocRows.map(d => d.storage_path)]);
+        await bucket.remove([...uploadedMainPaths, ...uploadedExtraPaths]);
         throw error;
       }
 
-      if (extraDocRows.length) {
-        const rows = extraDocRows.map(d => ({ ...d, kyc_record_id: savedKyc.id }));
-        const { error: docsError } = await supabase.from('kyc_documents').insert(rows);
-        if (docsError) {
-          await bucket.remove(extraDocRows.map(d => d.storage_path));
-          await supabase.from('kyc_records')
-            .update({ status: 'rejected', admin_note: 'अतिरिक्त कागजात सुरक्षित हुन सकेन; पुनः जाँच आवश्यक छ।' })
-            .eq('id', savedKyc.id);
-          throw new Error('मुख्य KYC दर्ता भयो, तर अतिरिक्त कागजातको विवरण सुरक्षित भएन: ' + docsError.message);
+      if (kycEditMode) {
+        for (const oldDoc of existingKycDocs) {
+          const meta = docMeta[oldDoc.document_kind];
+          if (!meta) continue;
+          const replacement = extraDocRows.find(d => d.document_kind === oldDoc.document_kind && d.document_side === oldDoc.document_side);
+          const { error: updateError } = await supabase.from('kyc_documents')
+            .update({
+              ...(replacement ? {storage_path: replacement.storage_path} : {}),
+              document_number: meta.number || meta.policy_number || meta.registration_number || null,
+              expiry_date: meta.expiry_date || null,
+              details: meta, status: 'pending', updated_at: new Date().toISOString()
+            }).eq('id', oldDoc.id);
+          if (updateError) throw updateError;
         }
+        for (const d of extraDocRows) {
+          const oldDoc = existingKycDocs.find(x => x.document_kind === d.document_kind && x.document_side === d.document_side);
+          if (!oldDoc) {
+            const {error: insertError} = await supabase.from('kyc_documents').insert({...d, kyc_record_id:savedKyc.id});
+            if (insertError) throw insertError;
+          }
+        }
+      } else if (extraDocRows.length) {
+        const rows = extraDocRows.map(d => ({...d, kyc_record_id:savedKyc.id}));
+        const {error: docsError} = await supabase.from('kyc_documents').insert(rows);
+        if (docsError) throw docsError;
       }
 
+      localStorage.removeItem('loadmitra_kyc_draft');
+      if ((localStorage.getItem('loadmitra_camera_target') || '').startsWith('kyc')) {
+        localStorage.removeItem('loadmitra_camera_target');
+      }
+      await clearLoadMitraDraftFiles('kyc');
       setForm({});
       setKycPhotoFile(null);
       setKycFrontFile(null);
       setKycBackFile(null);
       setKycExtraDocs({});
+      setKycEditMode(false);
+      setExistingKycFiles({photo_path:'',document_path:'',document_back_path:''});
+      setExistingKycDocs([]);
       setAccountKycStatus('प्रतीक्षामा (Pending)');
                                               setAccountKycNote('');
                                               setPage('kyc-pending');
                                               setMessage('');
     } catch (error) {
-      setMessage('KYC सुरक्षित भएन: ' + (error.message || 'फेरि प्रयास गर्नुहोस्।'));
+      setMessage('KYC सुरक्षित भएन (' + kycStage + '): ' + (error.message || 'फेरि प्रयास गर्नुहोस्।'));
     }
   };
 
@@ -2089,7 +2699,8 @@ const tr = (text) => featureTranslations[language]?.[text] || translations[langu
         const { error: upErr } = await supabase.storage
           .from('load-profile-photos').upload(photoPath, profilePhotoFile, { upsert: true });
         if (upErr) throw upErr;
-        setProfilePhotoUrl(supabase.storage.from('load-profile-photos').getPublicUrl(photoPath).data.publicUrl);
+        const { data: signed } = await supabase.storage.from('load-profile-photos').createSignedUrl(photoPath, 3600);
+        setProfilePhotoUrl(signed?.signedUrl || supabase.storage.from('load-profile-photos').getPublicUrl(photoPath).data.publicUrl);
       }
       const row = { user_id: uid, display_name: profileName, phone: profilePhone.trim(),
         email: auth.user.email || profileEmail.trim(),
@@ -2116,29 +2727,29 @@ const tr = (text) => featureTranslations[language]?.[text] || translations[langu
       {!(authStep === 'complete' && role && !isAppAdmin && kycCheckComplete && (page === 'kyc' || page === 'kyc-pending')) && <>
       <header className="top">
         <div className="brandmark">LM</div>
-        <div><h1>Load</h1><small>LOGISTICS & CARGO</small></div>
+        <div><h1>LoadMitra</h1><small>LOGISTICS & CARGO</small></div>
         <span className="truck">🚛</span>
         <div style={{display:'flex',gap:8,marginLeft:'auto',position:'relative'}}>
           <button type="button" aria-label="सूचनाहरू" onClick={() => go('notifications')} style={{position:'relative',fontSize:23,border:0,borderRadius:10,padding:'6px 10px',background:'#102b46',color:'white'}}>🔔{notifications.filter(n => !n.is_read).length > 0 && <span style={{position:'absolute',top:-5,right:-5,minWidth:20,height:20,padding:'0 4px',boxSizing:'border-box',borderRadius:12,background:'#e00000',color:'white',fontSize:10,fontWeight:'bold',display:'flex',alignItems:'center',justifyContent:'center',border:'1px solid white'}}>{notifications.filter(n => !n.is_read).length <= 5 ? notifications.filter(n => !n.is_read).length : Math.floor((notifications.filter(n => !n.is_read).length - 1) / 5) * 5 + '+'}</span>}</button>
           <button type="button" aria-label="मुख्य मेनु"  onClick={() => {setMainMenuOpen(!mainMenuOpen);setLanguageMenuOpen(false);}} style={{fontSize:27,border:0,borderRadius:10,padding:'4px 12px',background:'#102b46',color:'white'}}>⋮</button>
           {mainMenuOpen && <div style={{position:'absolute',right:0,top:'110%',zIndex:10000,width:235,maxHeight:'75vh',overflowY:'auto',background:'white',color:'#102b46',borderRadius:12,boxShadow:'0 4px 18px #0005',padding:6}}>
-            {[['settings-account','👤','Account'],['settings-privacy','🔐','Privacy'],['settings-lists','📋','Lists'],['settings-storage','💾','Storage and Data'],['settings-language','🌐','App Language'],['settings-help','❓','Help'],['settings-city','📍','City'],['settings-history','🕘','Request History'],['kyc','🪪','KYC प्रमाणिकरण']].map(([key,icon,label]) => <button key={key} type="button" onClick={() => {if(key==='settings-language'){setLanguageMenuOpen(!languageMenuOpen);}else{setMainMenuOpen(false);setLanguageMenuOpen(false);go(key);}}} style={{display:'block',width:'100%',textAlign:'left',padding:'12px 10px',border:0,borderRadius:8,background:'white',color:'#102b46',fontSize:15}}>{icon} {label}</button>)}
+            {[['settings-account','👤','Account'],['settings-privacy','🔐','Privacy'],['settings-lists','📋','Lists'],['settings-storage','💾','Storage and Data'],['settings-language','🌐','App Language'],['settings-help','❓','Help'],['settings-city','📍','City'],['settings-history','🕘','Request History'],['kyc','🪪','KYC प्रमाणिकरण']].map(([key,icon,label]) => <button key={key} type="button" onClick={() => {if(key==='settings-language'){setLanguageMenuOpen(!languageMenuOpen);}else{setMainMenuOpen(false);setLanguageMenuOpen(false);go(key);}}} style={{display:'block',width:'100%',textAlign:'left',padding:'12px 10px',border:0,borderRadius:8,background:'white',color:'#102b46',fontSize:15}}>{icon} {label === 'KYC प्रमाणिकरण' ? (language === 'English' ? 'KYC Verification' : language === 'हिन्दी' ? 'KYC सत्यापन' : language === '中文' ? 'KYC认证' : label) : tr(label)}</button>)}
             {languageMenuOpen && <div style={{padding:6,background:'#eef3f8',borderRadius:10}}>{[['नेपाली','🇳🇵'],['English','🇬🇧'],['हिन्दी','🇮🇳'],['中文','🇨🇳']].map(([name,flag]) => <button key={name} type="button" onClick={() => {setLanguage(name);localStorage.setItem('load_language', name);setLanguageMenuOpen(false);setMainMenuOpen(false);}} style={{display:'block',width:'100%',textAlign:'left',padding:10,border:0,borderRadius:8,background:language===name?'#d8e7f5':'transparent',color:'#102b46'}}>{flag} {name}</button>)}</div>}
-            <button type="button" onClick={() => {setMainMenuOpen(false);logout();}} style={{display:'block',width:'100%',textAlign:'left',padding:'12px 10px',border:0,borderTop:'1px solid #ddd',background:'white',color:'#c62828',fontSize:15}}>🚪 Logout</button>
+            <button type="button" onClick={() => {setMainMenuOpen(false);logout();}} style={{display:'block',width:'100%',textAlign:'left',padding:'12px 10px',border:0,borderTop:'1px solid #ddd',background:'white',color:'#c62828',fontSize:15}}>{tr("🚪 Logout")}</button>
           </div>}
         </div>
       </header>
 
       <div className={page === "home" ? "welcome home-welcome" : "welcome"}>
-        <small>LM LOGISTICS & CARGO</small>
-        <h2>{page === 'home' ? tr('तपाईंको ढुवानी, अब सजिलो!') : (titles[page] || ({'settings-account':'Account','settings-privacy':'Privacy','settings-lists':'Lists','settings-notifications':'Notifications','settings-storage':'Storage and Data','settings-language':'App Language','settings-help':'Help','settings-city':'City','settings-history':'Request History'}[page] || page))}</h2>
+        <small>LoadMitra Logistics</small>
+        <h2>{page === 'home' ? tr('तपाईंको ढुवानी, अब सजिलो!') : tr(titles[page] || ({'settings-account':'Account','settings-privacy':'Privacy','settings-lists':'Lists','settings-notifications':'Notifications','settings-storage':'Storage and Data','settings-language':'App Language','settings-help':'Help','settings-city':'City','settings-history':'Request History'}[page] || page))}</h2>
         <p>{tr('लोड खोज्नुहोस्। गाडी जोड्नुहोस्। कागजात व्यवस्थित राख्नुहोस्।')}</p>
         {page === 'home' && <div className="home-summary">
           <button type="button" onClick={() => go('settings-history')} className="summary-item">
-            <span>📦</span><b>{loads.length} लोड</b>
+            <span>📦</span><b>{loads.length} {tr('लोड')}</b>
           </button>
           <button type="button" onClick={() => go('bookings')} className="summary-item">
-            <span>📋</span><b>मेरो बुकिङ</b>
+            <span>📋</span><b>{tr('मेरा बुकिङ')}</b>
           </button>
         </div>}
       </div>
@@ -2146,9 +2757,9 @@ const tr = (text) => featureTranslations[language]?.[text] || translations[langu
 
       {page === 'kyc-pending' && <div className="panel" style={{textAlign:'center',padding:24}}>
                   <div style={{fontSize:48}}>⏳</div>
-                  <h3>KYC जाँच हुँदैछ</h3>
-                  <p>तपाईंका कागजात Admin ले जाँच गर्दै हुनुहुन्छ। स्वीकृति नआउँदासम्म अन्य सुविधा प्रयोग गर्न मिल्दैन।</p>
-                  <p><b>स्थिति:</b> Pending / प्रतीक्षामा</p>
+                  <h3>{tr("KYC जाँच हुँदैछ")}</h3>
+                  <p>{tr("तपाईंका कागजात प्रशासकले जाँच गर्दै हुनुहुन्छ। स्वीकृति नआउँदासम्म अन्य सुविधा प्रयोग गर्न मिल्दैन।")}</p>
+                  <p><b>{tr('स्थिति:' )}</b> {tr("Pending / प्रतीक्षामा")}</p>
                   <button type="button" onClick={async () => {
                     const { data: auth } = await supabase.auth.getUser();
                     if (!auth?.user) return;
@@ -2183,6 +2794,30 @@ const tr = (text) => featureTranslations[language]?.[text] || translations[langu
             </button>
           ))}
         </div>
+        <div className="panel" style={{marginTop:16}}>
+          <h3>तपाईंका लागि मिल्ने पोस्टहरू</h3>
+          {localStorage.getItem('load_role_category') === 'provider' ? (
+            loads.filter(l => l.owner_id !== auth?.user?.id).map(l => (
+              <div key={l.id} style={{padding:'10px 0',borderBottom:'1px solid #ddd'}}>
+                <b>{l.cargo || 'सामान'}</b>
+                <p>{l.origin} → {l.destination}</p>
+                <small>तौल: {l.weight || '-'} · भाडा: {l.proposed_price ?? '-'}</small>
+              </div>
+            ))
+          ) : (
+            vehiclePosts.filter(v => v.owner_id !== auth?.user?.id).map(v => (
+              <div key={v.id} style={{padding:'10px 0',borderBottom:'1px solid #ddd'}}>
+                <b>{v.vehicle_type || 'गाडी'}</b>
+                <p>{v.origin} → {v.destination}</p>
+                <small>क्षमता: {v.load_capacity ?? '-'} {v.capacity_unit || ''} · भाडा: {v.proposed_price ?? '-'}</small>
+              </div>
+            ))
+          )}
+          {localStorage.getItem('load_role_category') === 'provider'
+            ? loads.filter(l => l.owner_id !== auth?.user?.id).length === 0
+            : vehiclePosts.filter(v => v.owner_id !== auth?.user?.id).length === 0
+            ? <p>अहिले मिल्ने नयाँ पोस्ट छैन।</p> : null}
+        </div>
         <NearbyVehicleMap />
       </>}
 
@@ -2201,7 +2836,7 @@ const tr = (text) => featureTranslations[language]?.[text] || translations[langu
   <label>व्यक्ति वा कम्पनीको नाम</label>
         <input value={profileName} onChange={e => setProfileName(e.target.value)} required placeholder="नाम लेख्नुहोस्" />
         <label>प्रोफाइल फोटो वा कम्पनी लोगो</label>
-        <input type="file" accept="image/*" onChange={e => setProfilePhotoFile(e.target.files?.[0] || null)} />
+        <CameraGalleryPicker language={language} restoreKey="profilePhoto" accept="image/*" capture="user" selectedFile={profilePhotoFile} onChange={setProfilePhotoFile}/>
         <label>खाता स्थिति</label>
         <select value={profileStatus} onChange={e => setProfileStatus(e.target.value)}>
           <option value="active">सक्रिय</option>
@@ -2236,7 +2871,7 @@ const tr = (text) => featureTranslations[language]?.[text] || translations[langu
           <input required value={form.address_tole || ''} onChange={e => setForm({...form, address_tole:e.target.value})} placeholder={kycTr("टोलको नाम")}/>
         </label>
         <label className="field">{kycTr('पासपोर्ट साइजको आफ्नो फोटो *')}
-          <input required type="file" accept="image/*" capture="user" onChange={e => setKycPhotoFile(e.target.files?.[0] || null)}/>
+          <CameraGalleryPicker language={language} restoreKey="kycPhoto" accept="image/*" capture="user" selectedFile={kycPhotoFile} onChange={setKycPhotoFile}/>
         </label>
         <label className="field">{kycTr('कागजातको प्रकार')}
           <select required value={form.document_type || 'citizenship'} onChange={e => setForm({...form, document_type:e.target.value})}>
@@ -2250,10 +2885,10 @@ const tr = (text) => featureTranslations[language]?.[text] || translations[langu
           <input required value={form.document_number || ''} onChange={e => setForm({...form, document_number:e.target.value})}/>
         </label>
         <label className="field">{kycTr('कागजातको अगाडिको फोटो')}
-          <input required type="file" accept="image/*" capture="environment" onChange={e => setKycFrontFile(e.target.files?.[0] || null)}/>
+          <CameraGalleryPicker language={language} restoreKey="kycFront" accept="image/*" capture="environment" selectedFile={kycFrontFile} onChange={setKycFrontFile}/>
         </label>
         <label className="field">{kycTr('कागजातको पछाडिको फोटो')}
-          <input required type="file" accept="image/*" capture="environment" onChange={e => setKycBackFile(e.target.files?.[0] || null)}/>
+          <CameraGalleryPicker language={language} restoreKey="kycBack" accept="image/*" capture="environment" selectedFile={kycBackFile} onChange={setKycBackFile}/>
         </label>
         <label className="field">{kycTr('भूमिका / व्यवसायको प्रकार')}
           <select required value={roleType}
@@ -2301,8 +2936,7 @@ const tr = (text) => featureTranslations[language]?.[text] || translations[langu
         );
         const fileField = (label, key) => (
           <label className="field" key={key}>{kycTr(label)}
-            <input type="file" required accept="image/*,.pdf" capture="environment"
-              onChange={e => setKycExtraDocs(old => ({...old, [key]:e.target.files?.[0] || null}))}/>
+            <CameraGalleryPicker language={language} restoreKey={'kycExtra:' + key} accept="image/*,.pdf" capture="environment" selectedFile={kycExtraDocs[key]} onChange={file => setKycExtraDocs(old => ({...old, [key]:file}))}/>
           </label>
         );
         return <>
@@ -2407,6 +3041,10 @@ const tr = (text) => featureTranslations[language]?.[text] || translations[langu
           <p>सामान: {r.cargo_details || 'विवरण छैन'}</p>
           <p>प्रस्तावित भाडा: {r.proposed_fare == null ? 'उल्लेख छैन' : 'रु. '+Number(r.proposed_fare).toLocaleString('en-IN')}</p>
           <p>स्थिति: {{pending:'🟡 निर्णय बाँकी',accepted:'🔵 स्वीकार भयो',rejected:'❌ अस्वीकार भयो',completed:'🏁 पूरा भयो',cancelled:'रद्द भयो'}[r.status] || r.status}</p>
+          {r.status === 'pending' && currentUserId === r.vehicle_owner_id && <div>
+            <button type="button" className="primary" onClick={() => decideVehicleBookingRequest(r, true)}>बुकिङ स्वीकार गर्नुहोस्</button>
+            <button type="button" onClick={() => decideVehicleBookingRequest(r, false)}>बुकिङ अस्वीकार गर्नुहोस्</button>
+          </div>}
           <small>मिति: {r.created_at ? new Date(r.created_at).toLocaleString() : 'उपलब्ध छैन'}</small>
         </div>)}
         {bookings.length === 0 ? <p>अहिलेसम्म बुकिङ छैन।</p> :
@@ -2519,15 +3157,20 @@ const tr = (text) => featureTranslations[language]?.[text] || translations[langu
       </form>}
 
       {page === 'loads' && <div className="panel">
-        <h3>🚚 गाडी उपलब्ध गराउनुहोस् — लोडका लागि पोस्ट</h3>
-        <p>गाडीको स्थायी विवरण स्वीकृत KYC बाट स्वतः भरिन्छ।</p>
+        <h3>🚚 {tr("गाडी उपलब्ध गराउनुहोस् — लोडका लागि पोस्ट")}</h3>
+        {isDemoAccount && <div style={{background:'#fff7ed',padding:12,borderRadius:10,border:'1px solid #f59e0b',marginBottom:12}}>
+          <strong style={{color:'#b45309'}}>🧪 DEMO / TEST — वास्तविक कारोबार हुँदैन।</strong>
+          <p>परीक्षण गाडी: DEMO-TEST | परीक्षण गाडी | क्षमता: 5 ton</p>
+          <p>{tr("यो नक्कली परीक्षण विवरण हो, वास्तविक गाडी पोस्ट गर्न मिल्दैन।")}</p>
+        </div>}
+        <p>{isDemoAccount ? tr('यो Demo गाडी परीक्षणका लागि मात्र हो।') : tr('गाडीको स्थायी विवरण स्वीकृत KYC बाट स्वतः भरिन्छ।')}</p>
         <form onSubmit={save} className="panel">
-          <div className="field"><label>गाडीधनी / सेवा प्रदायक</label><input value={providerVehicle.name || ''} readOnly /></div>
-          <div className="field"><label>गाडी नम्बर (स्वीकृत KYC)</label><input value={providerVehicle.number || ''} readOnly /></div>
-          <div className="field"><label>गाडीको प्रकार (स्वीकृत KYC)</label><input value={providerVehicle.type || ''} readOnly /></div>
-          <div className="field"><label>लोड क्षमता (स्वीकृत KYC)</label><input value={providerVehicle.capacity ? providerVehicle.capacity + ' ' + (providerVehicle.unit || 'ton') : ''} readOnly /></div>
-          <div className="field"><label>सम्पर्क नम्बर</label><input type="tel" value={form.provider_phone ?? providerVehicle.phone ?? ''} onChange={e => setForm(prev => ({...prev, provider_phone:e.target.value}))} required /></div>
-          <div className="field"><label>गाडीको हालको स्थान</label><input value={form.provider_origin || ''} onChange={e => setForm(prev => ({...prev, provider_origin:e.target.value}))} required /></div>
+          <div className="field"><label>{tr("गाडीधनी / सेवा प्रदायक")}</label><input value={providerVehicle.name || ''} readOnly /></div>
+          <div className="field"><label>{tr("गाडी नम्बर (स्वीकृत KYC)")}</label><input value={providerVehicle.number || ''} readOnly /></div>
+          <div className="field"><label>{tr("गाडीको प्रकार (स्वीकृत KYC)")}</label><input value={providerVehicle.type || ''} readOnly /></div>
+          <div className="field"><label>{tr("लोड क्षमता (स्वीकृत KYC)")}</label><input value={providerVehicle.capacity ? providerVehicle.capacity + ' ' + (providerVehicle.unit || 'ton') : ''} readOnly /></div>
+          <div className="field"><label>{tr("सम्पर्क नम्बर")}</label><input type="tel" value={form.provider_phone ?? providerVehicle.phone ?? ''} onChange={e => setForm(prev => ({...prev, provider_phone:e.target.value}))} required /></div>
+          <div className="field"><label>{tr("गाडीको हालको स्थान")}</label><input value={form.provider_origin || ''} onChange={e => setForm(prev => ({...prev, provider_origin:e.target.value}))} required /></div>
           <button type="button" className="primary" onClick={async () => {
             try {
               const pos = await getCurrentGpsPosition();
@@ -2541,27 +3184,28 @@ const tr = (text) => featureTranslations[language]?.[text] || translations[langu
             } catch (err) {
               setMessage('GPS स्थान लिन सकिएन: ' + (err.message || err));
             }
-          }}>📍 हालको GPS स्थान लिनुहोस्</button>
+          }}>{"📍 " + tr("हालको GPS स्थान लिनुहोस्")}</button>
           {form.provider_origin_latitude != null && <small>GPS स्थान प्राप्त भयो ✓</small>}
-          <div className="field"><label>गाडी जान सक्ने गन्तव्य</label><input value={form.provider_destination || ''} onChange={e => setForm(prev => ({...prev, provider_destination:e.target.value}))} required /></div>
-          <div className="field"><label>उपलब्ध हुने मिति/समय (वैकल्पिक)</label><input type="datetime-local" value={form.provider_available_at || ''} onChange={e => setForm(prev => ({...prev, provider_available_at:e.target.value}))} /></div>
-          <div className="field"><label>प्रस्तावित भाडा (रु., वैकल्पिक)</label><input type="number" min="0" value={form.provider_price || ''} onChange={e => setForm(prev => ({...prev, provider_price:e.target.value}))} /></div>
-          {!providerVehicle.number && <p>गाडीको विवरण नदेखिए स्वीकृत KYC जाँच गर्नुहोस्।</p>}
-          <button className="primary" type="submit" disabled={!providerVehicle.number || !providerVehicle.type}>🚚 गाडीको पोस्ट सुरक्षित गर्नुहोस्</button>
+          <div className="field"><label>{tr("गाडी जान सक्ने गन्तव्य")}</label><input value={form.provider_destination || ''} onChange={e => setForm(prev => ({...prev, provider_destination:e.target.value}))} required /></div>
+          <div className="field"><label>{tr("उपलब्ध हुने मिति/समय (वैकल्पिक)")}</label><input type="datetime-local" value={form.provider_available_at || ''} onChange={e => setForm(prev => ({...prev, provider_available_at:e.target.value}))} /></div>
+          <div className="field"><label>{tr("प्रस्तावित भाडा (रु., वैकल्पिक)")}</label><input type="number" min="0" value={form.provider_price || ''} onChange={e => setForm(prev => ({...prev, provider_price:e.target.value}))} /></div>
+          {!providerVehicle.number && <p>{tr("गाडीको विवरण नदेखिए स्वीकृत KYC जाँच गर्नुहोस्।")}</p>}
+          <button className="primary" type="submit" disabled={isDemoAccount || !providerVehicle.number || !providerVehicle.type}>{isDemoAccount ? "🧪 DEMO — वास्तविक पोस्ट बन्द" : "🚚 गाडीको पोस्ट सुरक्षित गर्नुहोस्"}</button>
         </form>
         
       </div>}
 
       {page === 'truck' && <div className="panel">
-<h3>🚚 गाडी उपलब्ध गराउनुहोस्</h3>
-<p>गाडीको प्रकार, नम्बर र क्षमता स्वीकृत KYC बाट देखाइनेछ।</p>
-<div className="field"><label>गाडीधनी / सेवा प्रदायक</label><input value={providerVehicle.name || ""} readOnly /></div>
-<div className="field"><label>सम्पर्क नम्बर</label><input value={providerVehicle.phone || ""} readOnly /></div>
-<div className="field"><label>गाडी नम्बर</label><input value={providerVehicle.number || ""} readOnly /></div>
-<div className="field"><label>गाडीको प्रकार</label><input value={providerVehicle.type || ""} readOnly /></div>
-<div className="field"><label>लोड क्षमता</label><input value={providerVehicle.capacity ? providerVehicle.capacity + " " + providerVehicle.unit : ""} readOnly /></div>
-{!providerVehicle.number && <p>गाडीको विवरण नदेखिए स्वीकृत KYC जाँच गर्नुहोस्।</p>}
-<button type="button" className="primary" onClick={() => go('loads')}>उपलब्ध लोडहरू हेर्नुहोस्</button>
+<h3>🚚 {tr("गाडी उपलब्ध गराउनुहोस्")}</h3>
+        {isDemoAccount && <p style={{color:"#d97706",fontWeight:700}}>🧪 DEMO / TEST — वास्तविक कारोबार हुँदैन।</p>}
+<p>{tr("गाडीको प्रकार, नम्बर र क्षमता स्वीकृत KYC बाट देखाइनेछ।")}</p>
+<div className="field"><label>{tr("गाडीधनी / सेवा प्रदायक")}</label><input value={providerVehicle.name || ""} readOnly /></div>
+<div className="field"><label>{tr("सम्पर्क नम्बर")}</label><input value={providerVehicle.phone || ""} readOnly /></div>
+<div className="field"><label>{tr("गाडी नम्बर")}</label><input value={providerVehicle.number || ""} readOnly /></div>
+<div className="field"><label>{tr("गाडीको प्रकार")}</label><input value={providerVehicle.type || ""} readOnly /></div>
+<div className="field"><label>{tr("लोड क्षमता")}</label><input value={providerVehicle.capacity ? providerVehicle.capacity + " " + providerVehicle.unit : ""} readOnly /></div>
+{!providerVehicle.number && <p>{tr("गाडीको विवरण नदेखिए स्वीकृत KYC जाँच गर्नुहोस्।")}</p>}
+<button type="button" className="primary" onClick={() => go('loads')}>{tr("उपलब्ध लोडहरू हेर्नुहोस्")}</button>
 </div>}
 
       {['license', 'bluebook', 'insurance'].includes(page) &&
@@ -2621,49 +3265,49 @@ const tr = (text) => featureTranslations[language]?.[text] || translations[langu
 
       {(page.startsWith('settings-') || page === 'admin-application') && <div className={page.startsWith('settings-admin-') ? "panel admin-dashboard" : "panel"}>
         {['settings-admin-dashboard','settings-admin-applications','settings-admin-kyc','settings-admin-support','settings-admin-loads','settings-admin-bookings','settings-admin-users','settings-admin-payments','settings-admin-disputes','settings-admin-settings'].includes(page) && <>
-          <h3>{({'settings-admin-dashboard':'Admin Dashboard / प्रशासक ड्यासबोर्ड','settings-admin-applications':'Admin Applications / प्रशासक आवेदन','settings-admin-kyc':'User KYC / प्रयोगकर्ता प्रमाणिकरण','settings-admin-support':'Customer Support / ग्राहक सहायता','settings-admin-loads':'Loads / ढुवानी','settings-admin-bookings':'Bookings / बुकिङ','settings-admin-users':'User Management / प्रयोगकर्ता व्यवस्थापन','settings-admin-payments':'Payments / भुक्तानी','settings-admin-disputes':'Disputes / विवाद','settings-admin-settings':'Settings / सेटिङ'})[page]}</h3>
+          <h3>{({'settings-admin-dashboard':'Admin ड्यासबोर्ड / प्रशासक ड्यासबोर्ड','settings-admin-applications':'Admin आवेदनहरू / प्रशासक आवेदन','settings-admin-kyc':'User KYC / प्रयोगकर्ता प्रमाणिकरण','settings-admin-support':'ग्राहक सहायता / ग्राहक सहायता','settings-admin-loads':'Loads / ढुवानी','settings-admin-bookings':'Bookings / बुकिङ','settings-admin-users':'प्रयोगकर्ता व्यवस्थापन / प्रयोगकर्ता व्यवस्थापन','settings-admin-payments':'Payments / भुक्तानी','settings-admin-disputes':'Disputes / विवाद','settings-admin-settings':'Settings / सेटिङ'})[page]}</h3>
             <div className="admin-nav">
-              {[['settings-admin-dashboard','Dashboard',0],['settings-admin-applications','Admin Applications',adminApplications.filter(a=>String(a.status||'').toLowerCase()==='pending').length],['settings-admin-kyc','User KYC',adminKyc.filter(k=>String(k.status||'').toLowerCase()==='pending').length],['settings-admin-support','Customer Support',adminSupportPendingCount],['settings-admin-loads','Loads / ढुवानी',adminLoads.filter(l=>String(l.status||'').toLowerCase()==='open').length],['settings-admin-bookings','Bookings / बुकिङ',adminBookings.filter(b=>String(b.status||'').toLowerCase()==='pending'||['pending','requested'].includes(String(b.cancellation_status||'').toLowerCase())).length],['settings-admin-users','User Management',adminUsers.filter(u=>String(u.account_status||'').toLowerCase()==='inactive').length],['settings-admin-payments','Payments / भुक्तानी',adminPayments.filter(x=>!['completed','paid','success','succeeded','refunded','cancelled','canceled'].includes(String(x.status||'').toLowerCase())).length],['settings-admin-disputes','Disputes / विवाद',adminDisputes.filter(x=>['open','investigating','pending'].includes(String(x.status||'').toLowerCase())).length],['settings-admin-settings','Settings / सेटिङ',0]].map(([key,label,count])=><button key={key} type="button" onClick={()=>go(key)} style={{position:'relative',paddingRight:Number.isFinite(count)&&count>0?38:12}}>{label}{Number.isFinite(count)&&count>0&&<span style={{position:'absolute',top:3,right:4,minWidth:20,height:20,padding:'0 4px',boxSizing:'border-box',borderRadius:12,background:'#e00000',color:'white',fontSize:10,fontWeight:700,display:'inline-flex',alignItems:'center',justifyContent:'center'}}>{count<=5?count:Math.floor((count-1)/5)*5+'+'}</span>}</button>)}
+              {[['settings-admin-dashboard','ड्यासबोर्ड',0],['settings-admin-applications','Admin आवेदनहरू',adminApplications.filter(a=>String(a.status||'').toLowerCase()==='pending').length],['settings-admin-kyc','User KYC',adminKyc.filter(k=>String(k.status||'').toLowerCase()==='pending').length],['settings-admin-support','ग्राहक सहायता',adminSupportPendingCount],['settings-admin-loads','Loads / ढुवानी',adminLoads.filter(l=>String(l.status||'').toLowerCase()==='open').length],['settings-admin-bookings','Bookings / बुकिङ',adminBookings.filter(b=>String(b.status||'').toLowerCase()==='pending'||['pending','requested'].includes(String(b.cancellation_status||'').toLowerCase())).length],['settings-admin-users','प्रयोगकर्ता व्यवस्थापन',adminUsers.filter(u=>String(u.account_status||'').toLowerCase()==='inactive').length],['settings-admin-payments','Payments / भुक्तानी',adminPayments.filter(x=>!['completed','paid','success','succeeded','refunded','cancelled','canceled'].includes(String(x.status||'').toLowerCase())).length],['settings-admin-disputes','Disputes / विवाद',adminDisputes.filter(x=>['open','investigating','pending'].includes(String(x.status||'').toLowerCase())).length],['settings-admin-settings','Settings / सेटिङ',0]].map(([key,label,count])=><button key={key} type="button" onClick={()=>go(key)} style={{position:'relative',paddingRight:Number.isFinite(count)&&count>0?38:12}}>{label}{Number.isFinite(count)&&count>0&&<span style={{position:'absolute',top:3,right:4,minWidth:20,height:20,padding:'0 4px',boxSizing:'border-box',borderRadius:12,background:'#e00000',color:'white',fontSize:10,fontWeight:700,display:'inline-flex',alignItems:'center',justifyContent:'center'}}>{count<=5?count:Math.floor((count-1)/5)*5+'+'}</span>}</button>)}
             </div>
             {page === 'settings-admin-dashboard' && isAppAdmin && <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(140px,1fr))',gap:12,margin:'16px 0'}}>
-              {[['कुल Loads',adminLoads.length],['कुल Bookings',adminBookings.length],['खुला Loads',adminLoads.filter(x=>x.status==='open').length],['रद्द अनुरोध',adminBookings.filter(x=>['pending','requested'].includes(String(x.cancellation_status||'').toLowerCase())).length]].map(([label,count])=><div key={label} style={{padding:16,border:'1px solid #dce5ef',borderRadius:12,background:'#f7f9fc'}}><div style={{color:'#52657a',fontSize:14}}>{label}</div><strong style={{fontSize:28,color:'#102b46'}}>{count}</strong></div>)}
-              <button type="button" onClick={()=>go('settings-admin-loads')}>Loads सूची खोल्नुहोस्</button>
-              <button type="button" onClick={()=>go('settings-admin-bookings')}>Bookings सूची खोल्नुहोस्</button>
+              {[['कुल ढुवानी',adminLoads.length],['कुल बुकिङ',adminBookings.length],['खुला ढुवानी',adminLoads.filter(x=>x.status==='open').length],['रद्द अनुरोध',adminBookings.filter(x=>['pending','requested'].includes(String(x.cancellation_status||'').toLowerCase())).length]].map(([label,count])=><div key={label} style={{padding:16,border:'1px solid #dce5ef',borderRadius:12,background:'#f7f9fc'}}><div style={{color:'#52657a',fontSize:14}}>{label}</div><strong style={{fontSize:28,color:'#102b46'}}>{count}</strong></div>)}
+              <button type="button" onClick={()=>go('settings-admin-loads')}>{tr('Loads सूची खोल्नुहोस्')}</button>
+              <button type="button" onClick={()=>go('settings-admin-bookings')}>{tr('Bookings सूची खोल्नुहोस्')}</button>
             </div>}
             {isAppAdmin && <div className="admin-global-search" style={{margin:'12px 0 22px'}}>
               <input value={adminGlobalSearch} onChange={e=>setAdminGlobalSearch(e.target.value)} placeholder="सबै Admin विवरण खोज्नुहोस्..." aria-label="Global admin search" style={{width:'100%',boxSizing:'border-box',padding:13,border:'1px solid #d2dce8',borderRadius:10}} />
               {adminGlobalSearch.trim() && <div style={{marginTop:8}}>
-                {adminApplications.filter(a=>[a.full_name,a.email,a.phone,a.id_type,a.id_number,a.status,a.application_reason].some(v=>String(v||'').toLowerCase().includes(adminGlobalSearch.trim().toLowerCase()))).slice(0,8).map(a=><button key={'app-'+a.id} type="button" onClick={()=>go('settings-admin-applications')} style={{display:'block',width:'100%',textAlign:'left',padding:10,marginBottom:6,border:'1px solid #e1e8f0',borderRadius:8,background:'#fff',color:'#102b46'}}>Admin Application: {a.full_name||a.email||a.phone||a.id} · {a.status}</button>)}
-                {adminKyc.filter(k=>[k.full_name,k.phone,k.document_type,k.document_number,k.status].some(v=>String(v||'').toLowerCase().includes(adminGlobalSearch.trim().toLowerCase()))).slice(0,8).map(k=><button key={'kyc-'+k.id} type="button" onClick={()=>go('settings-admin-kyc')} style={{display:'block',width:'100%',textAlign:'left',padding:10,marginBottom:6,border:'1px solid #e1e8f0',borderRadius:8,background:'#fff',color:'#102b46'}}>User KYC: {k.full_name||k.phone||k.id} · {k.status}</button>)}
-{adminLoads.filter(l=>[l.origin,l.destination,l.cargo,l.status,l.owner_id].some(v=>String(v||'').toLowerCase().includes(adminGlobalSearch.trim().toLowerCase()))).slice(0,8).map(l=><button key={'load-'+l.id} type="button" onClick={()=>go('settings-admin-loads')} style={{display:'block',width:'100%',textAlign:'left',padding:10,marginBottom:6,border:'1px solid #e1e8f0',borderRadius:8,background:'#fff',color:'#102b46'}}>Load: {l.origin||'—'} → {l.destination||'—'} · {l.status}</button>)}
-{adminBookings.filter(b=>[b.id,b.load_id,b.customer_id,b.driver_id,b.status,b.cancellation_status].some(v=>String(v||'').toLowerCase().includes(adminGlobalSearch.trim().toLowerCase()))).slice(0,8).map(b=><button key={'booking-'+b.id} type="button" onClick={()=>go('settings-admin-bookings')} style={{display:'block',width:'100%',textAlign:'left',padding:10,marginBottom:6,border:'1px solid #e1e8f0',borderRadius:8,background:'#fff',color:'#102b46'}}>Booking: {b.id} · {b.status}</button>)}
-                {['settings-admin-dashboard','settings-admin-applications','settings-admin-kyc','settings-admin-support','settings-admin-loads','settings-admin-bookings','settings-admin-users','settings-admin-payments','settings-admin-disputes'].filter(key=>({'settings-admin-dashboard':'dashboard प्रशासक','settings-admin-applications':'application आवेदन admin','settings-admin-kyc':'kyc प्रमाणिकरण user','settings-admin-support':'support सहायता complaint ग्राहक','settings-admin-loads':'loads ढुवानी सामान','settings-admin-bookings':'bookings बुकिङ reservation','settings-admin-users':'users प्रयोगकर्ता account खाता','settings-admin-payments':'payments भुक्तानी transaction','settings-admin-disputes':'disputes विवाद refund उजुरी','settings-admin-settings':'settings सेटिङ configuration कन्फिगरेसन'})[key].includes(adminGlobalSearch.trim().toLowerCase())).map(key=><button key={key} type="button" onClick={()=>go(key)} style={{display:'block',padding:10,marginBottom:6}}>{({'settings-admin-dashboard':'Dashboard','settings-admin-applications':'Admin Applications','settings-admin-kyc':'User KYC','settings-admin-support':'Customer Support','settings-admin-loads':'Loads / ढुवानी','settings-admin-bookings':'Bookings / बुकिङ','settings-admin-users':'User Management','settings-admin-payments':'Payments','settings-admin-disputes':'Disputes','settings-admin-settings':'Settings'})[key]} खोल्नुहोस्</button>)}
+                {adminApplications.filter(a=>[a.full_name,a.email,a.phone,a.id_type,a.id_number,a.status,a.application_reason].some(v=>String(v||'').toLowerCase().includes(adminGlobalSearch.trim().toLowerCase()))).slice(0,8).map(a=><button key={'app-'+a.id} type="button" onClick={()=>go('settings-admin-applications')} style={{display:'block',width:'100%',textAlign:'left',padding:10,marginBottom:6,border:'1px solid #e1e8f0',borderRadius:8,background:'#fff',color:'#102b46'}}>{tr("Admin Application")}: {a.full_name||a.email||a.phone||a.id} · {a.status}</button>)}
+                {adminKyc.filter(k=>[k.full_name,k.phone,k.document_type,k.document_number,k.status].some(v=>String(v||'').toLowerCase().includes(adminGlobalSearch.trim().toLowerCase()))).slice(0,8).map(k=><button key={'kyc-'+k.id} type="button" onClick={()=>go('settings-admin-kyc')} style={{display:'block',width:'100%',textAlign:'left',padding:10,marginBottom:6,border:'1px solid #e1e8f0',borderRadius:8,background:'#fff',color:'#102b46'}}>{tr("User KYC")}: {k.full_name||k.phone||k.id} · {k.status}</button>)}
+{adminLoads.filter(l=>[l.origin,l.destination,l.cargo,l.status,l.owner_id].some(v=>String(v||'').toLowerCase().includes(adminGlobalSearch.trim().toLowerCase()))).slice(0,8).map(l=><button key={'load-'+l.id} type="button" onClick={()=>go('settings-admin-loads')} style={{display:'block',width:'100%',textAlign:'left',padding:10,marginBottom:6,border:'1px solid #e1e8f0',borderRadius:8,background:'#fff',color:'#102b46'}}>{tr("Load")}: {l.origin||'—'} → {l.destination||'—'} · {l.status}</button>)}
+{adminBookings.filter(b=>[b.id,b.load_id,b.customer_id,b.driver_id,b.status,b.cancellation_status].some(v=>String(v||'').toLowerCase().includes(adminGlobalSearch.trim().toLowerCase()))).slice(0,8).map(b=><button key={'booking-'+b.id} type="button" onClick={()=>go('settings-admin-bookings')} style={{display:'block',width:'100%',textAlign:'left',padding:10,marginBottom:6,border:'1px solid #e1e8f0',borderRadius:8,background:'#fff',color:'#102b46'}}>{tr("Booking")}: {b.id} · {b.status}</button>)}
+                {['settings-admin-dashboard','settings-admin-applications','settings-admin-kyc','settings-admin-support','settings-admin-loads','settings-admin-bookings','settings-admin-users','settings-admin-payments','settings-admin-disputes'].filter(key=>({'settings-admin-dashboard':'dashboard प्रशासक','settings-admin-applications':'application आवेदन admin','settings-admin-kyc':'kyc प्रमाणिकरण user','settings-admin-support':'support सहायता complaint ग्राहक','settings-admin-loads':'loads ढुवानी सामान','settings-admin-bookings':'bookings बुकिङ reservation','settings-admin-users':'users प्रयोगकर्ता account खाता','settings-admin-payments':'payments भुक्तानी transaction','settings-admin-disputes':'disputes विवाद refund उजुरी','settings-admin-settings':'settings सेटिङ configuration कन्फिगरेसन'})[key].includes(adminGlobalSearch.trim().toLowerCase())).map(key=><button key={key} type="button" onClick={()=>go(key)} style={{display:'block',padding:10,marginBottom:6}}>{({'settings-admin-dashboard':'ड्यासबोर्ड','settings-admin-applications':'Admin आवेदनहरू','settings-admin-kyc':'User KYC','settings-admin-support':'ग्राहक सहायता','settings-admin-loads':'Loads / ढुवानी','settings-admin-bookings':'Bookings / बुकिङ','settings-admin-users':'प्रयोगकर्ता व्यवस्थापन','settings-admin-payments':'Payments','settings-admin-disputes':'Disputes','settings-admin-settings':'Settings'})[key]} खोल्नुहोस्</button>)}
               </div>}
             </div>}
-          {!isAppAdmin ? <p>Admin अनुमति प्रमाणित छैन। Account बाट Admin Login गर्नुहोस्।</p> : <>
+          {!isAppAdmin ? <p>{tr('Admin अनुमति प्रमाणित छैन। Account बाट Admin Login गर्नुहोस्।')}</p> : <>
             {page === 'settings-admin-support' && <AdminSupportPanel supabase={supabase} />}
             {page !== 'settings-admin-support' && adminKycMessage && <p>{adminKycMessage}</p>}
-            {page === 'settings-admin-payments' && <><h3>Payments / भुक्तानी</h3><p>{adminOperationsMessage}</p>{adminPayments.map(x=><details key={x.id} style={{border:'1px solid #ddd',borderRadius:10,padding:12,margin:'10px 0',overflowWrap:'anywhere'}}><summary>रु. {x.amount} {x.currency} · {x.status}</summary><p>Payment ID: {x.id}</p><p>Booking ID: {x.booking_id||'—'}</p><p>भुक्तानी गर्ने User ID: {x.payer_id||'—'}</p><p>पाउने User ID: {x.payee_id||'—'}</p><p>माध्यम: {x.method||'—'}</p><p>Transaction reference: {x.transaction_reference||'—'}</p><p>मिति: {x.created_at?new Date(x.created_at).toLocaleString():'—'}</p></details>)}{adminPayments.length===0&&<p>भुक्तानी विवरण छैन वा डाटाबेस अनुमति जाँच आवश्यक छ।</p>}</>}
-{page === 'settings-admin-disputes' && <><h3>Disputes / भुक्तानी विवाद</h3><p>{adminOperationsMessage}</p>{adminDisputes.map(x=><details key={x.id} style={{border:'1px solid #ddd',borderRadius:10,padding:12,margin:'10px 0',overflowWrap:'anywhere'}}><summary>{x.status} · {x.reason}</summary><p>Dispute ID: {x.id}</p><p>Payment ID: {x.payment_id}</p><p>उजुरीकर्ता User ID: {x.raised_by||'—'}</p><p>कारण: {x.reason}</p><p>Admin note: {x.admin_note||'—'}</p>
+            {page === 'settings-admin-payments' && <><h3>{tr('Payments / भुक्तानी')}</h3><p>{adminOperationsMessage}</p>{adminPayments.map(x=><details key={x.id} style={{border:'1px solid #ddd',borderRadius:10,padding:12,margin:'10px 0',overflowWrap:'anywhere'}}><summary>रु. {x.amount} {x.currency} · {x.status}</summary><p>Payment ID: {x.id}</p><p>Booking ID: {x.booking_id||'—'}</p><p>भुक्तानी गर्ने User ID: {x.payer_id||'—'}</p><p>पाउने User ID: {x.payee_id||'—'}</p><p>माध्यम: {x.method||'—'}</p><p>Transaction reference: {x.transaction_reference||'—'}</p><p>मिति: {x.created_at?new Date(x.created_at).toLocaleString():'—'}</p></details>)}{adminPayments.length===0&&<p>भुक्तानी विवरण छैन वा डाटाबेस अनुमति जाँच आवश्यक छ।</p>}</>}
+{page === 'settings-admin-disputes' && <><h3>{tr('विवाद')}</h3><p>{adminOperationsMessage}</p>{adminDisputes.map(x=><details key={x.id} style={{border:'1px solid #ddd',borderRadius:10,padding:12,margin:'10px 0',overflowWrap:'anywhere'}}><summary>{x.status} · {x.reason}</summary><p>Dispute ID: {x.id}</p><p>Payment ID: {x.payment_id}</p><p>उजुरीकर्ता User ID: {x.raised_by||'—'}</p><p>कारण: {x.reason}</p><p>Admin note: {x.admin_note||'—'}</p>
 <select value={x.status} onChange={e=>setAdminDisputes(rows=>rows.map(r=>r.id===x.id?{...r,status:e.target.value}:r))} style={{width:'100%',padding:10,marginTop:8}}><option value="open">खुला</option><option value="investigating">जाँच हुँदै</option><option value="resolved">समाधान भयो</option><option value="rejected">अस्वीकृत</option></select>
 <textarea value={x.admin_note||''} onChange={e=>setAdminDisputes(rows=>rows.map(r=>r.id===x.id?{...r,admin_note:e.target.value}:r))} placeholder="Admin टिप्पणी" style={{width:'100%',padding:10,marginTop:8,boxSizing:'border-box'}}/>
-<button type="button" onClick={async()=>{const {error}=await supabase.from('payment_disputes').update({status:x.status,admin_note:x.admin_note||null,resolved_at:x.status==='resolved'?new Date().toISOString():null}).eq('id',x.id);setAdminOperationsMessage(error?'विवाद सुरक्षित भएन: '+error.message:'विवादको विवरण सुरक्षित भयो।');}} style={{padding:10,marginTop:8}}>परिवर्तन सुरक्षित गर्नुहोस्</button>
+<button type="button" onClick={async()=>{const {error}=await supabase.from('payment_disputes').update({status:x.status,admin_note:x.admin_note||null,resolved_at:x.status==='resolved'?new Date().toISOString():null}).eq('id',x.id);setAdminOperationsMessage(error?'विवाद सुरक्षित भएन: '+error.message:'विवादको विवरण सुरक्षित भयो।');}} style={{padding:10,marginTop:8}}>{tr('परिवर्तन सुरक्षित गर्नुहोस्')}</button>
 <p>मिति: {x.created_at?new Date(x.created_at).toLocaleString():'—'}</p></details>)}{adminDisputes.length===0&&<p>विवाद विवरण छैन वा डाटाबेस अनुमति जाँच आवश्यक छ।</p>}</>}
-{page === 'settings-admin-settings' && <><h3>एप सेटिङ र सेवा अवस्था</h3>
+{page === 'settings-admin-settings' && <><h3>{tr('एप सेटिङ र सेवा अवस्था')}</h3>
 <div style={{border:'1px solid #ddd',borderRadius:10,padding:14,margin:'10px 0'}}>
-<p><b>एप:</b> Load</p><p><b>मुख्य सेवा:</b> सामान ढुवानी र बुकिङ</p>
-<p><b>भुक्तानी Gateway:</b> जोडिएको छैन</p><p><b>eSewa / Khalti:</b> जोडिएको छैन</p>
+<p><b>{tr("एप:")}</b> LoadMitra</p><p><b>मुख्य सेवा:</b> सामान ढुवानी र बुकिङ</p>
+<p><b>भुक्तानी प्रणाली:</b> जोडिएको छैन</p><p><b>eSewa / Khalti:</b> जोडिएको छैन</p>
 <p><b>इमेल OTP:</b> हालको Brevo सेटअप परिवर्तन गरिएको छैन</p>
-<p><b>Admin अनुमति:</b> is_app_admin() बाट जाँच</p>
+<p><b>प्रशासक अनुमति:</b> is_app_admin() बाट जाँच</p>
 <p><b>सुरक्षा:</b> भुक्तानी र विवादका तालिकामा RLS सक्षम गरिएको छ</p>
 </div><p>नोट: यहाँ देखाइएको अवस्था हालको कोड र डाटाबेस सेटअपमा आधारित छ; वास्तविक कारोबार परीक्षण गरिएको छैन।</p></>}
-{page === 'settings-admin-users' && <><h3>प्रयोगकर्ता व्यवस्थापन</h3><input value={adminUsersSearch} onChange={e=>setAdminUsersSearch(e.target.value)} placeholder="नाम, फोन, इमेल वा User ID खोज्नुहोस्" style={{width:'100%',padding:12,boxSizing:'border-box'}}/><p>{adminOperationsMessage}</p>{adminUsers.filter(u=>[u.display_name,u.phone,u.email,u.user_id,u.account_status].some(v=>String(v||'').toLowerCase().includes(adminUsersSearch.toLowerCase()))).map(u=><details key={u.user_id} style={{border:'1px solid #ddd',borderRadius:10,padding:12,margin:'10px 0',overflowWrap:'anywhere'}}><summary>{u.display_name||'नाम छैन'} · {u.account_status||'स्थिति छैन'}</summary><p>फोन: {u.phone||'—'}</p><p>इमेल: {u.email||'—'}</p><p>ठेगाना: {u.address||'—'}</p><p>User ID: {u.user_id}</p><p>खाता स्थिति: {u.account_status||'—'}</p></details>)}{adminUsers.length===0&&<p>प्रयोगकर्ता सूची खाली छ वा डाटाबेसले पहुँच दिएन।</p>}</>}
-{page === 'settings-admin-loads' && <><h3>Loads / ढुवानी सूची</h3><input value={adminOperationsSearch} onChange={e=>setAdminOperationsSearch(e.target.value)} placeholder="स्थान, सामान वा स्थिति खोज्नुहोस्" style={{width:'100%',padding:12,boxSizing:'border-box'}}/><select value={adminOperationsFilter} onChange={e=>setAdminOperationsFilter(e.target.value)} style={{width:'100%',padding:12,marginTop:8}}><option value="all">सबै स्थिति</option><option value="open">खुला</option><option value="completed">पूरा</option><option value="cancelled">रद्द</option></select><p>{adminOperationsMessage}</p>{adminLoads.filter(l=>(adminOperationsFilter==='all'||String(l.status||'').toLowerCase()===adminOperationsFilter)&&[l.origin,l.destination,l.cargo,l.status,l.owner_id].some(v=>String(v||'').toLowerCase().includes(adminOperationsSearch.toLowerCase()))).map(l=><details key={l.id} style={{border:'1px solid #ddd',borderRadius:10,padding:12,margin:'10px 0',overflowWrap:'anywhere'}}><summary>{l.origin||'स्थान छैन'} → {l.destination||'स्थान छैन'} · {l.status}</summary><p>सामान: {l.cargo||'—'}</p><p>तौल: {l.weight??'—'}</p><p>भाडा: रु. {l.proposed_price??'—'}</p><p>लोड ID: {l.id}</p><p>मालिक ID: {l.owner_id}</p><p>मिति: {l.created_at?new Date(l.created_at).toLocaleString():'—'}</p></details>)}{adminLoads.length===0&&<p>लोड भेटिएन वा डाटाबेस अनुमति जाँच आवश्यक छ।</p>}</>}
-{page === 'settings-admin-bookings' && <><h3>Bookings / बुकिङ सूची</h3><input value={adminOperationsSearch} onChange={e=>setAdminOperationsSearch(e.target.value)} placeholder="बुकिङ ID, स्थिति वा प्रयोगकर्ता ID खोज्नुहोस्" style={{width:'100%',padding:12,boxSizing:'border-box'}}/><select value={adminOperationsFilter} onChange={e=>setAdminOperationsFilter(e.target.value)} style={{width:'100%',padding:12,marginTop:8}}><option value="all">सबै स्थिति</option><option value="pending">प्रतीक्षामा</option><option value="completed">पूरा</option><option value="cancelled">रद्द</option></select><p>{adminOperationsMessage}</p>{adminBookings.filter(b=>(adminOperationsFilter==='all'||String(b.status||'').toLowerCase()===adminOperationsFilter)&&[b.id,b.load_id,b.customer_id,b.driver_id,b.status,b.cancellation_status,b.cancellation_reason].some(v=>String(v||'').toLowerCase().includes(adminOperationsSearch.toLowerCase()))).map(b=><details key={b.id} style={{border:'1px solid #ddd',borderRadius:10,padding:12,margin:'10px 0',overflowWrap:'anywhere'}}><summary>बुकिङ {b.id} · {{completed:'✅ डेलिभरी पूरा',cancelled:'❌ रद्द भयो',pending:'🕒 प्रतीक्षामा',open:'🕒 प्रतीक्षामा',accepted:'🤝 स्वीकार भयो',rejected:'❌ अस्वीकार भयो',in_transit:'🚚 ढुवानी हुँदैछ'}[b.status] || b.status}</summary><p>लोड ID: {b.load_id}</p><p>ग्राहक ID: {b.customer_id}</p><p>ड्राइभर ID: {b.driver_id}</p><p>दूरी: {b.actual_distance_km??'—'} km</p><p>वास्तविक भाडा: रु. {b.actual_fare??'—'}</p><p>रद्द अवस्था: {b.cancellation_status||'—'}</p><p>रद्द कारण: {b.cancellation_reason||'—'}</p><p>मिति: {b.created_at?new Date(b.created_at).toLocaleString():'—'}</p></details>)}{adminBookings.length===0&&<p>बुकिङ भेटिएन वा डाटाबेस अनुमति जाँच आवश्यक छ।</p>}</>}
-{page === 'settings-admin-applications' && <><h3>Admin आवेदनहरू / Admin Applications</h3>
+{page === 'settings-admin-users' && <><h3>{tr('प्रयोगकर्ता व्यवस्थापन')}</h3><input value={adminUsersSearch} onChange={e=>setAdminUsersSearch(e.target.value)} placeholder="नाम, फोन, इमेल वा User ID खोज्नुहोस्" style={{width:'100%',padding:12,boxSizing:'border-box'}}/><p>{adminOperationsMessage}</p>{adminUsers.filter(u=>[u.display_name,u.phone,u.email,u.user_id,u.account_status].some(v=>String(v||'').toLowerCase().includes(adminUsersSearch.toLowerCase()))).map(u=><details key={u.user_id} style={{border:'1px solid #ddd',borderRadius:10,padding:12,margin:'10px 0',overflowWrap:'anywhere'}}><summary>{u.display_name||'नाम छैन'} · {u.account_status||'स्थिति छैन'}</summary><p>फोन: {u.phone||'—'}</p><p>इमेल: {u.email||'—'}</p><p>ठेगाना: {u.address||'—'}</p><p>User ID: {u.user_id}</p><p>खाता स्थिति: {u.account_status||'—'}</p></details>)}{adminUsers.length===0&&<p>प्रयोगकर्ता सूची खाली छ वा डाटाबेसले पहुँच दिएन।</p>}</>}
+{page === 'settings-admin-loads' && <><h3>{tr('ढुवानी सूची')}</h3><input value={adminOperationsSearch} onChange={e=>setAdminOperationsSearch(e.target.value)} placeholder="स्थान, सामान वा स्थिति खोज्नुहोस्" style={{width:'100%',padding:12,boxSizing:'border-box'}}/><select value={adminOperationsFilter} onChange={e=>setAdminOperationsFilter(e.target.value)} style={{width:'100%',padding:12,marginTop:8}}><option value="all">सबै स्थिति</option><option value="open">खुला</option><option value="completed">पूरा</option><option value="cancelled">रद्द</option></select><p>{adminOperationsMessage}</p>{adminLoads.filter(l=>(adminOperationsFilter==='all'||String(l.status||'').toLowerCase()===adminOperationsFilter)&&[l.origin,l.destination,l.cargo,l.status,l.owner_id].some(v=>String(v||'').toLowerCase().includes(adminOperationsSearch.toLowerCase()))).map(l=><details key={l.id} style={{border:'1px solid #ddd',borderRadius:10,padding:12,margin:'10px 0',overflowWrap:'anywhere'}}><summary>{l.origin||'स्थान छैन'} → {l.destination||'स्थान छैन'} · {l.status}</summary><p>सामान: {l.cargo||'—'}</p><p>तौल: {l.weight??'—'}</p><p>भाडा: रु. {l.proposed_price??'—'}</p><p>लोड ID: {l.id}</p><p>मालिक ID: {l.owner_id}</p><p>मिति: {l.created_at?new Date(l.created_at).toLocaleString():'—'}</p></details>)}{adminLoads.length===0&&<p>{tr('लोड भेटिएन वा डाटाबेस अनुमति जाँच आवश्यक छ।')}</p>}</>}
+{page === 'settings-admin-bookings' && <><h3>{tr('बुकिङ सूची')}</h3><input value={adminOperationsSearch} onChange={e=>setAdminOperationsSearch(e.target.value)} placeholder="बुकिङ ID, स्थिति वा प्रयोगकर्ता ID खोज्नुहोस्" style={{width:'100%',padding:12,boxSizing:'border-box'}}/><select value={adminOperationsFilter} onChange={e=>setAdminOperationsFilter(e.target.value)} style={{width:'100%',padding:12,marginTop:8}}><option value="all">सबै स्थिति</option><option value="pending">प्रतीक्षामा</option><option value="completed">पूरा</option><option value="cancelled">रद्द</option></select><p>{adminOperationsMessage}</p>{adminBookings.filter(b=>(adminOperationsFilter==='all'||String(b.status||'').toLowerCase()===adminOperationsFilter)&&[b.id,b.load_id,b.customer_id,b.driver_id,b.status,b.cancellation_status,b.cancellation_reason].some(v=>String(v||'').toLowerCase().includes(adminOperationsSearch.toLowerCase()))).map(b=><details key={b.id} style={{border:'1px solid #ddd',borderRadius:10,padding:12,margin:'10px 0',overflowWrap:'anywhere'}}><summary>बुकिङ {b.id} · {{completed:'✅ डेलिभरी पूरा',cancelled:'❌ रद्द भयो',pending:'🕒 प्रतीक्षामा',open:'🕒 प्रतीक्षामा',accepted:'🤝 स्वीकार भयो',rejected:'❌ अस्वीकार भयो',in_transit:'🚚 ढुवानी हुँदैछ'}[b.status] || b.status}</summary><p>लोड ID: {b.load_id}</p><p>ग्राहक ID: {b.customer_id}</p><p>ड्राइभर ID: {b.driver_id}</p><p>दूरी: {b.actual_distance_km??'—'} km</p><p>वास्तविक भाडा: रु. {b.actual_fare??'—'}</p><p>रद्द अवस्था: {b.cancellation_status||'—'}</p><p>रद्द कारण: {b.cancellation_reason||'—'}</p><p>मिति: {b.created_at?new Date(b.created_at).toLocaleString():'—'}</p></details>)}{adminBookings.length===0&&<p>{tr('बुकिङ भेटिएन वा डाटाबेस अनुमति जाँच आवश्यक छ।')}</p>}</>}
+{page === 'settings-admin-applications' && <><h3>{tr("Admin आवेदनहरू / Admin आवेदनहरू")}</h3>
             {adminApplicationsMessage && <p>{adminApplicationsMessage}</p>}
             {adminApplications.length===0 && !adminApplicationsMessage && <p>अहिलेसम्म आवेदन छैन।</p>}
-            {adminApplications.map(a=><details key={a.id} style={{border:"1px solid #ddd",borderRadius:10,padding:12,margin:"10px 0",overflowWrap:"anywhere"}}><summary style={{fontWeight:700,cursor:"pointer"}}>{a.full_name} · {a.status}</summary><p>इमेल: {a.email}</p><p>फोन: {a.phone}</p><p>कागजात: {a.id_type} · {a.id_number}</p><p>कारण: {a.application_reason||"-"}</p><p>कार्ययोजना: {a.work_plan||"-"}</p>{a.admin_note&&<p>Admin टिप्पणी: {a.admin_note}</p>}{isRootAdmin && a.status==="pending"&&<><button type="button" className="primary" onClick={async()=>{const {error}=await supabase.rpc("review_admin_application",{p_application_id:a.id,p_decision:"approved",p_admin_note:"स्वीकृत"});if(error)setAdminApplicationsMessage("स्वीकृत भएन: "+error.message);else{setAdminApplications(old=>old.map(x=>x.id===a.id?{...x,status:"approved",admin_note:"स्वीकृत"}:x));setAdminApplicationsMessage("आवेदन स्वीकृत भयो।")}}}>Approve / स्वीकृत</button><button type="button" style={{marginLeft:8,padding:10}} onClick={async()=>{const note=prompt("अस्वीकृत गर्नुको कारण लेख्नुहोस्:");if(note===null)return;const {error}=await supabase.rpc("review_admin_application",{p_application_id:a.id,p_decision:"rejected",p_admin_note:note});if(error)setAdminApplicationsMessage("Reject भएन: "+error.message);else{setAdminApplications(old=>old.map(x=>x.id===a.id?{...x,status:"rejected",admin_note:note}:x));setAdminApplicationsMessage("आवेदन अस्वीकृत भयो।")}}}>Reject / अस्वीकृत</button></>}</details>)}
+            {adminApplications.map(a=><details key={a.id} style={{border:"1px solid #ddd",borderRadius:10,padding:12,margin:"10px 0",overflowWrap:"anywhere"}}><summary style={{fontWeight:700,cursor:"pointer"}}>{a.full_name} · {a.status}</summary><p>इमेल: {a.email}</p><p>फोन: {a.phone}</p><p>कागजात: {a.id_type} · {a.id_number}</p><p>कारण: {a.application_reason||"-"}</p><p>कार्ययोजना: {a.work_plan||"-"}</p>{a.admin_note&&<p>प्रशासक टिप्पणी: {a.admin_note}</p>}{isRootAdmin && a.status==="pending"&&<><button type="button" className="primary" onClick={async()=>{const {error}=await supabase.rpc("review_admin_application",{p_application_id:a.id,p_decision:"approved",p_admin_note:"स्वीकृत"});if(error)setAdminApplicationsMessage("स्वीकृत भएन: "+error.message);else{setAdminApplications(old=>old.map(x=>x.id===a.id?{...x,status:"approved",admin_note:"स्वीकृत"}:x));setAdminApplicationsMessage("आवेदन स्वीकृत भयो।")}}}>{tr('Approve / स्वीकृत')}</button><button type="button" style={{marginLeft:8,padding:10}} onClick={async()=>{const note=prompt("अस्वीकृत गर्नुको कारण लेख्नुहोस्:");if(note===null)return;const {error}=await supabase.rpc("review_admin_application",{p_application_id:a.id,p_decision:"rejected",p_admin_note:note});if(error)setAdminApplicationsMessage("Reject भएन: "+error.message);else{setAdminApplications(old=>old.map(x=>x.id===a.id?{...x,status:"rejected",admin_note:note}:x));setAdminApplicationsMessage("आवेदन अस्वीकृत भयो।")}}}>{tr('Reject / अस्वीकृत')}</button></>}</details>)}
             </>}{page === 'settings-admin-kyc' && <>{adminStats && <div style={{display:'grid',gridTemplateColumns:'repeat(2,minmax(0,1fr))',gap:8,margin:'12px 0'}}>
               {[
                 ['कुल खाता',adminStats.total_accounts],
@@ -2681,32 +3325,32 @@ const tr = (text) => featureTranslations[language]?.[text] || translations[langu
             {adminKyc.filter(k=>(adminKycFilter==='all'||k.status===adminKycFilter)&&[k.full_name,k.phone,k.document_type,k.document_number].some(v=>String(v||'').toLowerCase().includes(adminKycSearch.toLowerCase()))).map(k=><details key={k.id} style={{border:'1px solid #ddd',borderRadius:10,padding:12,margin:'10px 0',overflowWrap:'anywhere'}}>
               <summary style={{cursor:'pointer',fontWeight:700}}>{k.full_name||'नाम छैन'} · {k.phone||'फोन छैन'}<p style={{fontWeight:400,margin:'6px 0'}}>कागजात: {k.document_type||'उपलब्ध छैन'} · {k.created_at?new Date(k.created_at).toLocaleDateString():'मिति छैन'}</p><span>{({pending:'🟠 प्रतीक्षामा',approved:'🟢 स्वीकृत',rejected:'🔴 अस्वीकृत'})[k.status]||k.status}</span></summary>
               <p>प्रयोगकर्ता ID: {k.user_id}</p><p>कागजात नम्बर: {k.document_number||'उपलब्ध छैन'}</p>
-              {k.admin_note&&<p>टिप्पणी: {k.admin_note}</p>}{k.fileError&&<p>फाइल समस्या: {k.fileError}</p>}{k.photoUrl&&<div><p>पासपोर्ट साइजको फोटो</p><a href={k.photoUrl} target="_blank" rel="noreferrer">फोटो खोल्नुहोस्</a><img src={k.photoUrl} alt="पासपोर्ट साइजको फोटो" style={{display:'block',width:100,height:100,objectFit:'cover',borderRadius:'50%',marginTop:8}} /></div>}
-              {k.role_details&&Object.entries(k.role_details).some(([key,value])=>value!==''&&value!==null&&value!==undefined)&&<div style={{background:'#eef5ff',padding:12,borderRadius:8,margin:'10px 0',overflowWrap:'anywhere'}}><h4 style={{margin:'0 0 8px'}}>भूमिका अनुसार KYC विवरण</h4>{Object.entries(k.role_details).filter(([key,value])=>value!==''&&value!==null&&value!==undefined).map(([key,value])=><p key={key} style={{margin:'4px 0'}}><b>{{personal_transport_purpose:'ढुवानीको उद्देश्य',personal_goods_type:'सामानको प्रकार',personal_transport_notes:'थप विवरण',business_name:'व्यवसायको नाम',business_type:'व्यवसायको प्रकार',business_address:'व्यवसायको ठेगाना',business_representative_name:'प्रतिनिधिको नाम',business_representative_position:'प्रतिनिधिको पद',business_registration_number:'व्यवसाय दर्ता नम्बर',business_pan_vat_number:'PAN/VAT नम्बर',business_goods_type:'ढुवानी गर्ने सामान',driver_license_number:'लाइसेन्स नम्बर',driver_license_name:'लाइसेन्सधारीको नाम',driver_license_class:'लाइसेन्स वर्ग',driver_license_issue_date:'लाइसेन्स जारी मिति',driver_license_expiry_date:'लाइसेन्स म्याद',vehicle_type:'गाडीको प्रकार',vehicle_number:'गाडी नम्बर',bluebook_number:'ब्लुबुक नम्बर',bluebook_owner_name:'ब्लुबुकमा भएको गाडीधनी',bluebook_issue_date:'ब्लुबुक जारी मिति',bluebook_renewal_date:'ब्लुबुक नवीकरण मिति',bluebook_expiry_date:'ब्लुबुक म्याद',load_capacity:'भारवहन क्षमता',capacity_unit:'क्षमता एकाइ',vehicle_length:'गाडीको लम्बाइ',insurance_company:'बीमा कम्पनी',insurance_policy_number:'बीमा पोलिसी नम्बर',insurance_start_date:'बीमा सुरु मिति',insurance_expiry_date:'बीमा म्याद',company_name:'कम्पनीको नाम',company_registration_number:'कम्पनी दर्ता नम्बर',company_issue_date:'कम्पनी दर्ता मिति',company_expiry_date:'कम्पनी दर्ता म्याद',role_type:'छानिएको भूमिका'}[key]||key}:</b> {String(value)}</p>)}</div>}{k.frontUrl&&<div><p>अगाडिको कागजात</p><a href={k.frontUrl} target="_blank" rel="noreferrer">फोटो खोल्नुहोस्</a><img src={k.frontUrl} alt="अगाडिको कागजात" style={{display:'block',width:'100%',maxWidth:360,marginTop:8,borderRadius:8}} /></div>}
-              {k.backUrl&&<div><p>पछाडिको कागजात</p><a href={k.backUrl} target="_blank" rel="noreferrer">फोटो खोल्नुहोस्</a><img src={k.backUrl} alt="पछाडिको कागजात" style={{display:'block',width:'100%',maxWidth:360,marginTop:8,borderRadius:8}} /></div>}
-              {adminKycDocuments.filter(d=>d.kyc_record_id===k.id||d.user_id===k.user_id).map(d=><div key={d.id} style={{border:'1px solid #ddd',borderRadius:8,padding:10,margin:'10px 0',overflowWrap:'anywhere'}}><p><b>अतिरिक्त कागजात:</b> {d.document_kind||'प्रकार उल्लेख छैन'} · {d.document_side||'पक्ष उल्लेख छैन'}</p><p>कागजात नम्बर: {d.document_number||'—'}</p>{d.details&&<div style={{background:'#f7f9fc',padding:8,borderRadius:6,margin:'8px 0'}}><b>कागजात/व्यवसाय विवरण:</b>{Object.entries(d.details).filter(([key,value])=>value!==''&&value!==null&&value!==undefined).map(([key,value])=><p key={key} style={{margin:'4px 0',overflowWrap:'anywhere'}}><b>{{business_name:'व्यवसायको नाम',business_type:'व्यवसायको प्रकार',business_address:'व्यवसायको ठेगाना',representative_name:'प्रतिनिधिको नाम',representative_position:'प्रतिनिधिको पद',registration_number:'दर्ता नम्बर',pan_vat_number:'PAN/VAT नम्बर',goods_type:'सामानको प्रकार',role_type:'भूमिका',number:'नम्बर',holder_name:'धनी/लाइसेन्सधारीको नाम',owner_name:'ब्लुबुकमा भएको गाडीधनीको नाम',company_name:'कम्पनी/इन्स्योरेन्सको नाम',policy_number:'बीमा पोलिसी नम्बर',insured_date:'बीमा सुरु मिति',expiry_date:'म्याद सकिने मिति'}[key]||key}:</b> {String(value)}</p>)}</div>}<p>म्याद: {d.expiry_date||'—'}</p><p>स्थिति: {({pending:'प्रतीक्षामा',approved:'स्वीकृत',rejected:'अस्वीकृत'})[d.status]||d.status||'—'}</p>{d.admin_note&&<p>Admin टिप्पणी: {d.admin_note}</p>}{d.fileError&&<p>फाइल समस्या: {d.fileError}</p>}{d.fileUrl&&<><a href={d.fileUrl} target="_blank" rel="noreferrer">कागजात खोल्नुहोस्</a><img src={d.fileUrl} alt="अतिरिक्त KYC कागजात" style={{display:'block',width:'100%',maxWidth:360,marginTop:8,borderRadius:8}} /></>}</div>)}<button type="button" className="primary" onClick={()=>decideKyc(k.id,'approved')}>Approve / स्वीकृत</button><button type="button" style={{marginLeft:8,padding:10}} onClick={()=>decideKyc(k.id,'rejected')}>Reject / अस्वीकृत</button>
+              {k.admin_note&&<p>टिप्पणी: {k.admin_note}</p>}{k.fileError&&<p>फाइल समस्या: {k.fileError}</p>}{k.photoUrl&&<div><p>पासपोर्ट साइजको फोटो</p><a href={k.photoUrl} target="_blank" rel="noreferrer">{tr('फोटो खोल्नुहोस्')}</a><img src={k.photoUrl} alt="पासपोर्ट साइजको फोटो" style={{display:'block',width:100,height:100,objectFit:'cover',borderRadius:'50%',marginTop:8}} /></div>}
+              {k.role_details&&Object.entries(k.role_details).some(([key,value])=>value!==''&&value!==null&&value!==undefined)&&<div style={{background:'#eef5ff',padding:12,borderRadius:8,margin:'10px 0',overflowWrap:'anywhere'}}><h4 style={{margin:'0 0 8px'}}>{tr('भूमिका अनुसार KYC विवरण')}</h4>{Object.entries(k.role_details).filter(([key,value])=>value!==''&&value!==null&&value!==undefined).map(([key,value])=><p key={key} style={{margin:'4px 0'}}><b>{{personal_transport_purpose:'ढुवानीको उद्देश्य',personal_goods_type:'सामानको प्रकार',personal_transport_notes:'थप विवरण',business_name:'व्यवसायको नाम',business_type:'व्यवसायको प्रकार',business_address:'व्यवसायको ठेगाना',business_representative_name:'प्रतिनिधिको नाम',business_representative_position:'प्रतिनिधिको पद',business_registration_number:'व्यवसाय दर्ता नम्बर',business_pan_vat_number:'PAN/VAT नम्बर',business_goods_type:'ढुवानी गर्ने सामान',driver_license_number:'लाइसेन्स नम्बर',driver_license_name:'लाइसेन्सधारीको नाम',driver_license_class:'लाइसेन्स वर्ग',driver_license_issue_date:'लाइसेन्स जारी मिति',driver_license_expiry_date:'लाइसेन्स म्याद',vehicle_type:'गाडीको प्रकार',vehicle_number:'गाडी नम्बर',bluebook_number:'ब्लुबुक नम्बर',bluebook_owner_name:'ब्लुबुकमा भएको गाडीधनी',bluebook_issue_date:'ब्लुबुक जारी मिति',bluebook_renewal_date:'ब्लुबुक नवीकरण मिति',bluebook_expiry_date:'ब्लुबुक म्याद',load_capacity:'भारवहन क्षमता',capacity_unit:'क्षमता एकाइ',vehicle_length:'गाडीको लम्बाइ',insurance_company:'बीमा कम्पनी',insurance_policy_number:'बीमा पोलिसी नम्बर',insurance_start_date:'बीमा सुरु मिति',insurance_expiry_date:'बीमा म्याद',company_name:'कम्पनीको नाम',company_registration_number:'कम्पनी दर्ता नम्बर',company_issue_date:'कम्पनी दर्ता मिति',company_expiry_date:'कम्पनी दर्ता म्याद',role_type:'छानिएको भूमिका'}[key]||key}:</b> {String(value)}</p>)}</div>}{k.frontUrl&&<div><p>अगाडिको कागजात</p><a href={k.frontUrl} target="_blank" rel="noreferrer">{tr('फोटो खोल्नुहोस्')}</a><img src={k.frontUrl} alt="अगाडिको कागजात" style={{display:'block',width:'100%',maxWidth:360,marginTop:8,borderRadius:8}} /></div>}
+              {k.backUrl&&<div><p>पछाडिको कागजात</p><a href={k.backUrl} target="_blank" rel="noreferrer">{tr('फोटो खोल्नुहोस्')}</a><img src={k.backUrl} alt="पछाडिको कागजात" style={{display:'block',width:'100%',maxWidth:360,marginTop:8,borderRadius:8}} /></div>}
+              {adminKycDocuments.filter(d=>d.kyc_record_id===k.id||d.user_id===k.user_id).map(d=><div key={d.id} style={{border:'1px solid #ddd',borderRadius:8,padding:10,margin:'10px 0',overflowWrap:'anywhere'}}><p><b>{tr('अतिरिक्त कागजात:')}</b> {d.document_kind||'प्रकार उल्लेख छैन'} · {d.document_side||'पक्ष उल्लेख छैन'}</p><p>कागजात नम्बर: {d.document_number||'—'}</p>{d.details&&<div style={{background:'#f7f9fc',padding:8,borderRadius:6,margin:'8px 0'}}><b>कागजात/व्यवसाय विवरण:</b>{Object.entries(d.details).filter(([key,value])=>value!==''&&value!==null&&value!==undefined).map(([key,value])=><p key={key} style={{margin:'4px 0',overflowWrap:'anywhere'}}><b>{{business_name:'व्यवसायको नाम',business_type:'व्यवसायको प्रकार',business_address:'व्यवसायको ठेगाना',representative_name:'प्रतिनिधिको नाम',representative_position:'प्रतिनिधिको पद',registration_number:'दर्ता नम्बर',pan_vat_number:'PAN/VAT नम्बर',goods_type:'सामानको प्रकार',role_type:'भूमिका',number:'नम्बर',holder_name:'धनी/लाइसेन्सधारीको नाम',owner_name:'ब्लुबुकमा भएको गाडीधनीको नाम',company_name:'कम्पनी/इन्स्योरेन्सको नाम',policy_number:'बीमा पोलिसी नम्बर',insured_date:'बीमा सुरु मिति',expiry_date:'म्याद सकिने मिति'}[key]||key}:</b> {String(value)}</p>)}</div>}<p>म्याद: {d.expiry_date||'—'}</p><p>स्थिति: {({pending:'प्रतीक्षामा',approved:'स्वीकृत',rejected:'अस्वीकृत'})[d.status]||d.status||'—'}</p>{d.admin_note&&<p>प्रशासक टिप्पणी: {d.admin_note}</p>}{d.fileError&&<p>फाइल समस्या: {d.fileError}</p>}{d.fileUrl&&<><a href={d.fileUrl} target="_blank" rel="noreferrer">{tr('कागजात खोल्नुहोस्')}</a><img src={d.fileUrl} alt="अतिरिक्त KYC कागजात" style={{display:'block',width:'100%',maxWidth:360,marginTop:8,borderRadius:8}} /></>}</div>)}<button type="button" className="primary" onClick={()=>decideKyc(k.id,'approved')}>{tr('Approve / स्वीकृत')}</button><button type="button" style={{marginLeft:8,padding:10}} onClick={()=>decideKyc(k.id,'rejected')}>{tr('Reject / अस्वीकृत')}</button>
             </details>)}
             {adminKyc.length===0&&<p>KYC सूची खाली छ वा लोड हुँदैछ।</p>}</>}
           </>}
         </>}
         {page === 'settings-account' && <>
-          <h3>Account / खाता स्थिति</h3>
+          <h3>{tr('Account / खाता स्थिति' )}</h3>
           {profilePhotoUrl && <img src={profilePhotoUrl} alt="प्रोफाइल फोटो" style={{width:80,height:80,borderRadius:'50%',objectFit:'cover',display:'block',margin:'8px 0'}} />}
           <h3>{profileName || 'युजरको नाम'}</h3>
           <p>📍 ठेगाना: {profileAddress || 'प्रोफाइलमा ठेगाना थप्नुहोस्'}</p>
           <p>📞 फोन: {profilePhone || 'प्रोफाइलमा फोन नम्बर थप्नुहोस्'}</p>
           <p>✉️ Email: {profileEmail || 'लगइनपछि उपलब्ध हुनेछ'}</p>
           <p>हालको भूमिका: {role || 'छानिएको छैन'}</p>
-          <p>KYC Verification: <b>{accountKycStatus.includes('स्वीकृत') && !accountKycStatus.includes('अस्वीकृत') ? '✅ Verified' : accountKycStatus.includes('अस्वीकृत') ? '❌ Rejected' : accountKycStatus.includes('प्रतीक्षामा') ? '☑️ Pending' : accountKycStatus}</b></p>
+          <p>{tr("KYC Verification:")} <b>{accountKycStatus.includes('स्वीकृत') && !accountKycStatus.includes('अस्वीकृत') ? '✅ Verified' : accountKycStatus.includes('अस्वीकृत') ? '❌ Rejected' : accountKycStatus.includes('प्रतीक्षामा') ? '☑️ Pending' : accountKycStatus}</b></p>
 
           <p>खाता स्थिति: {profileStatus === 'inactive' ? 'निष्क्रिय' : 'सक्रिय'}</p>
           <p>KYC प्रमाणिकरण: <b>{accountKycStatus}</b></p>
-          {accountKycNote && <p>Admin टिप्पणी: {accountKycNote}</p>}
-          <button type="button" className="primary" onClick={() => go('kyc')}>KYC विवरण खोल्नुहोस्</button>
-          <button type="button" style={{marginTop:12,padding:10}} onClick={() => { setShowAdminLogin(v => !v); setAdminLoginMessage(''); }}>Admin Login</button>
+          {accountKycNote && <p>प्रशासक टिप्पणी: {accountKycNote}</p>}
+          <button type="button" className="primary" onClick={openKycEdit}>{tr('KYC विवरण खोल्नुहोस्' )}</button>
+          <button type="button" style={{marginTop:12,padding:10}} onClick={() => { setShowAdminLogin(v => !v); setAdminLoginMessage(''); }}>{tr("Admin Login")} </button>
           {showAdminLogin && <>
-            <h3>Admin Login / प्रशासक लगइन</h3>
-            <button type="button" className="primary" style={{display:'block',width:'100%',margin:'8px 0'}} onClick={() => {setAdminApplicationMessage('');setMainMenuOpen(false);setPage('admin-application');setForm({});setMessage('');}}>Create Admin Account / Admin बन्न आवेदन</button>
+            <h3>{tr('Admin Login / प्रशासक लगइन' )}</h3>
+            <button type="button" className="primary" style={{display:'block',width:'100%',margin:'8px 0'}} onClick={() => {setAdminApplicationMessage('');setMainMenuOpen(false);setPage('admin-application');setForm({});setMessage('');}}>{tr('Create Admin Account / Admin बन्न आवेदन' )}</button>
             <input type="email" autoComplete="username" placeholder="Admin Email / ID" value={adminEmail} onChange={e => setAdminEmail(e.target.value)} style={{display:'block',width:'100%',boxSizing:'border-box',padding:12,margin:'8px 0'}} />
             <div style={{display:'flex',gap:8,alignItems:'center',margin:'8px 0'}}>
               <input type={showAdminPassword ? 'text' : 'password'} autoComplete="current-password" placeholder="Password" value={adminPassword} onChange={e => setAdminPassword(e.target.value)} style={{flex:1,minWidth:0,boxSizing:'border-box',padding:12}} />
@@ -2720,15 +3364,15 @@ const tr = (text) => featureTranslations[language]?.[text] || translations[langu
               setAdminLoginMessage('पासवर्ड रिसेट इमेल पठाउँदैछ...');
               const { error } = await supabase.auth.resetPasswordForEmail(adminEmail.trim(), { redirectTo: window.location.origin });
               setAdminLoginMessage(error ? 'इमेल पठाउन सकिएन: ' + error.message : 'पासवर्ड रिसेट लिंक इमेलमा पठाइयो। Inbox वा Spam जाँच गर्नुहोस्।');
-            }}>Forgot Password? / पासवर्ड बिर्सनुभयो?</button>
-            <button type="button" style={{display:'block',margin:'8px 0',padding:8,background:'transparent',border:0,color:'#2563eb',textDecoration:'underline'}} onClick={() => { setShowResetPassword(v => !v); setResetPasswordMessage(''); }}>Reset Password / नयाँ पासवर्ड राख्नुहोस्</button>
+            }}>{tr('Forgot Password? / पासवर्ड बिर्सनुभयो?' )}</button>
+            <button type="button" style={{display:'block',margin:'8px 0',padding:8,background:'transparent',border:0,color:'#2563eb',textDecoration:'underline'}} onClick={() => { setShowResetPassword(v => !v); setResetPasswordMessage(''); }}>{tr('Reset Password / नयाँ पासवर्ड राख्नुहोस्' )}</button>
             {showResetPassword && <>
-              <p>पासवर्ड रिसेट इमेलको लिंकबाट यो पेज खोलेपछि नयाँ पासवर्ड राख्नुहोस्।</p>
+              <p>{tr('पासवर्ड रिसेट इमेलको लिंकबाट यो पेज खोलेपछि नयाँ पासवर्ड राख्नुहोस्।' )}</p>
               <div style={{display:'flex',gap:8,alignItems:'center',margin:'8px 0'}}>
-                <input type={showAdminPassword ? 'text' : 'password'} autoComplete="new-password" placeholder="नयाँ पासवर्ड (कम्तीमा 8 अक्षर)" value={newAdminPassword} onChange={e => setNewAdminPassword(e.target.value)} style={{flex:1,minWidth:0,boxSizing:'border-box',padding:12}} />
+                <input type={showAdminPassword ? 'text' : 'password'} autoComplete="new-password" placeholder={tr('नयाँ पासवर्ड (कम्तीमा 8 अक्षर)')} value={newAdminPassword} onChange={e => setNewAdminPassword(e.target.value)} style={{flex:1,minWidth:0,boxSizing:'border-box',padding:12}} />
                 <button type="button" onClick={() => setShowAdminPassword(v => !v)} style={{padding:10}}>{showAdminPassword ? '🙈' : '👁️'}</button>
               </div>
-              <input type={showAdminPassword ? 'text' : 'password'} autoComplete="new-password" placeholder="नयाँ पासवर्ड फेरि लेख्नुहोस्" value={confirmAdminPassword} onChange={e => setConfirmAdminPassword(e.target.value)} style={{display:'block',width:'100%',boxSizing:'border-box',padding:12,margin:'8px 0'}} />
+              <input type={showAdminPassword ? 'text' : 'password'} autoComplete="new-password" placeholder={tr('नयाँ पासवर्ड फेरि लेख्नुहोस्')} value={confirmAdminPassword} onChange={e => setConfirmAdminPassword(e.target.value)} style={{display:'block',width:'100%',boxSizing:'border-box',padding:12,margin:'8px 0'}} />
               <button type="button" className="primary" onClick={async () => {
                 setResetPasswordMessage('');
                 if (newAdminPassword.length < 8) { setResetPasswordMessage('पासवर्ड कम्तीमा 8 अक्षरको हुनुपर्छ।'); return; }
@@ -2744,7 +3388,7 @@ const tr = (text) => featureTranslations[language]?.[text] || translations[langu
                 setConfirmAdminPassword('');
                 setAdminPassword('');
                 setResetPasswordMessage('पासवर्ड सफलतापूर्वक परिवर्तन भयो। अब नयाँ पासवर्डबाट लगइन गर्न सक्नुहुन्छ।');
-              }}>Change Password / पासवर्ड परिवर्तन</button>
+              }}>{tr('Change Password / पासवर्ड परिवर्तन' )}</button>
               {resetPasswordMessage && <p role="status">{resetPasswordMessage}</p>}
             </>}
             {adminLoginMessage && <p>{adminLoginMessage}</p>}
@@ -2764,15 +3408,15 @@ const tr = (text) => featureTranslations[language]?.[text] || translations[langu
               setShowAdminLogin(false);
               setAdminLoginMessage('');
               go('settings-admin-dashboard');
-            }}>Login / लगइन</button>
+            }}>{tr('Login / लगइन' )}</button>
           </>}
 
 
         </>}
 
         {page === 'admin-application' && <>
-          <h3>Admin Account Application / Admin आवेदन</h3>
-          <p>आवेदन Root Admin ले जाँच गर्नेछन्। फारम पठाउँदैमा Admin अधिकार प्राप्त हुँदैन।</p>
+          <h3>{tr('Admin Account Application / Admin आवेदन' )}</h3>
+          <p>{tr('आवेदन Root Admin ले जाँच गर्नेछन्। फारम पठाउँदैमा Admin अधिकार प्राप्त हुँदैन।' )}</p>
           <form onSubmit={async e => {
             e.preventDefault();
             setAdminApplicationBusy(true);
@@ -2821,26 +3465,26 @@ const tr = (text) => featureTranslations[language]?.[text] || translations[langu
                 <option value="Citizenship">नागरिकता</option><option value="National ID">राष्ट्रिय परिचयपत्र</option><option value="Passport">पासपोर्ट</option><option value="Driving License">सवारी चालक अनुमतिपत्र</option>
               </select>
             </label>
-            <label>पासपोर्ट साइज फोटो (अनिवार्य, अगाडिबाट खिचेको) *<input required type="file" accept="image/jpeg,image/png,image/webp" onChange={e=>setAdminApplicantPhoto(e.target.files?.[0]||null)}/><small>आफ्नो अनुहार स्पष्ट देखिने पासपोर्ट साइज फोटो छान्नुहोस्।</small></label>
-            <label>परिचयपत्र अगाडिको फोटो *<input required type="file" accept="image/*" onChange={e=>setAdminDocumentFront(e.target.files?.[0]||null)}/></label>
-            <label>परिचयपत्र पछाडिको फोटो *<input required type="file" accept="image/*" onChange={e=>setAdminDocumentBack(e.target.files?.[0]||null)}/></label>
+            <label>पासपोर्ट साइज फोटो (अनिवार्य, अगाडिबाट खिचेको) *<CameraGalleryPicker language={language} restoreKey="adminApplicantPhoto" accept="image/jpeg,image/png,image/webp" capture="user" selectedFile={adminApplicantPhoto} onChange={setAdminApplicantPhoto}/><small>{tr('आफ्नो अनुहार स्पष्ट देखिने पासपोर्ट साइज फोटो छान्नुहोस्।' )}</small></label>
+            <label>परिचयपत्र अगाडिको फोटो *<CameraGalleryPicker language={language} restoreKey="adminDocumentFront" accept="image/*" capture="environment" selectedFile={adminDocumentFront} onChange={setAdminDocumentFront}/></label>
+            <label>परिचयपत्र पछाडिको फोटो *<CameraGalleryPicker language={language} restoreKey="adminDocumentBack" accept="image/*" capture="environment" selectedFile={adminDocumentBack} onChange={setAdminDocumentBack}/></label>
             <label style={{display:'flex',gap:10,alignItems:'flex-start',margin:'12px 0',lineHeight:1.6}}>
               <input type="checkbox" required checked={adminApplicationForm.responsibilityAccepted} onChange={e=>setAdminApplicationForm(v=>({...v,responsibilityAccepted:e.target.checked}))} style={{width:22,height:22,flexShrink:0}} />
               <span>मैले दिएको विवरण सत्य हो। म आफ्नो जिम्मेवारी बुझेर Admin आवेदन दिँदैछु र नियम पालना गर्नेछु। *</span>
             </label>
-            <textarea rows={3} placeholder="ऐच्छिक: Admin बन्न चाहनुको कारण लेख्नुहोस्" value={adminApplicationForm.application_reason} onChange={e=>setAdminApplicationForm(v=>({...v,application_reason:e.target.value}))}/>
+            <textarea rows={3} placeholder={tr('ऐच्छिक: Admin बन्न चाहनुको कारण लेख्नुहोस्')} value={adminApplicationForm.application_reason} onChange={e=>setAdminApplicationForm(v=>({...v,application_reason:e.target.value}))}/>
             <label>Admin बन्ने निवेदन (ऐच्छिक, २ देखि २०० वा बढी शब्द)
             <textarea rows={9} placeholder="ऐच्छिक: आफ्नो अनुभव वा Admin बन्न चाहनुको कारण लेख्नुहोस्—२ देखि २०० वा बढी शब्द, अथवा खाली छोड्न सक्नुहुन्छ।" value={adminApplicationForm.work_plan} onChange={e=>setAdminApplicationForm(v=>({...v,work_plan:e.target.value}))} style={{width:'100%',boxSizing:'border-box',padding:12}}/>
             <small>{adminApplicationForm.work_plan.trim() ? adminApplicationForm.work_plan.trim().split(/\s+/).filter(Boolean).length : 0} शब्द</small>
             </label>
             {adminApplicationMessage && <p role="status">{adminApplicationMessage}</p>}
             <button type="submit" className="primary" disabled={adminApplicationBusy}>{adminApplicationBusy?'पठाउँदैछ...':'आवेदन पठाउनुहोस्'}</button>
-            <button type="button" onClick={()=>go('settings-account')}>फर्कनुहोस्</button>
+            <button type="button" onClick={()=>go('settings-account')}>{tr('फर्कनुहोस्' )}</button>
           </form>
         </>}
 
         {page === 'settings-privacy' && <>
-          <h3>Privacy / गोपनीयता</h3>
+          <h3>{tr('Privacy / गोपनीयता' )}</h3>
           <p>आफ्नो खाता बन्द गर्ने र स्थायी रूपमा मेटाउने विकल्प छुट्टाछुट्टै छन्।</p>
           <button type="button" className="primary" onClick={async () => {
             if (!window.confirm('खाता अस्थायी रूपमा बन्द गर्ने? फेरि प्रयोग गर्न सहयोग आवश्यक पर्न सक्छ।')) return;
@@ -2853,7 +3497,7 @@ const tr = (text) => featureTranslations[language]?.[text] || translations[langu
             await supabase.auth.signOut();
             setMessage('खाता बन्द भयो।');
             setPage('home');
-          }}>Account Deactivate</button>
+          }}>{tr("Account Deactivate")}</button>
           <button type="button" style={{display:'block',width:'100%',padding:14,marginTop:12,border:0,borderRadius:10,background:'#b91c1c',color:'white',fontWeight:700}} onClick={async () => {
             if (!window.confirm('तपाईंको खाता स्थायी रूपमा मेटाउने? यो काम फिर्ता गर्न सकिँदैन।')) return;
             setMessage('खाता मेटाउँदै...');
@@ -2864,31 +3508,31 @@ const tr = (text) => featureTranslations[language]?.[text] || translations[langu
             await supabase.auth.signOut();
             setMessage('खाता मेटियो।');
             setPage('home');
-          }}>Delete Account</button>
+          }}>{tr("Delete Account")}</button>
         </>}
         {page === 'settings-lists' && <>
-          <h3>Lists / सूचीहरू</h3>
+          <h3>{tr('Lists / सूचीहरू' )}</h3>
           {sections.map(item => <button key={item[0]} type="button" onClick={() => go(item[0])} style={{display:'block',width:'100%',padding:13,margin:'8px 0',textAlign:'left',border:'1px solid #ddd',borderRadius:10,background:'white',color:'#102b46'}}>{item[1]} {item[2]}</button>)}
         </>}
         {page === 'settings-notifications' && <>
-          <h3>Notifications / सूचनाहरू</h3>
-          <p>लोड, बुकिङ र खातासम्बन्धी सूचनाहरू यहाँ हेर्नुहोस्।</p>
+          <h3>{tr('Notifications / सूचनाहरू' )}</h3>
+          <p>{tr('लोड, बुकिङ र खातासम्बन्धी सूचनाहरू यहाँ हेर्नुहोस्।' )}</p>
           <button type="button" onClick={() => go('notifications')} style={{padding:'12px 16px',border:0,borderRadius:8,background:'#FF6500',color:'white'}}>🔔 सूचनाहरू हेर्नुहोस्</button>
         </>}
         {page === 'settings-storage' && <>
-          <h3>Storage and Data / डाटा</h3>
+          <h3>{tr('Storage and Data / डाटा' )}</h3>
           <p>लोड सूचीमा हाल देखिएका रेकर्ड: {loads.length}</p>
-          <p>मोबाइलमा फाइल र डाटा व्यवस्थापन सुविधा पछि जोड्न सकिन्छ।</p>
+          <p>{tr('मोबाइलमा फाइल र डाटा व्यवस्थापन सुविधा पछि जोड्न सकिन्छ।' )}</p>
         </>}
         {page === 'settings-language' && <>
-          <h3>App Language / एपको भाषा</h3>
+          <h3>{tr('App Language / एपको भाषा' )}</h3>
           {[['नेपाली','🇳🇵'],['English','🇬🇧'],['हिन्दी','🇮🇳'],['中文','🇨🇳']].map(([name,flag]) =>
             <button key={name} type="button" onClick={() => {setLanguage(name);localStorage.setItem('load_language', name);}} style={{display:'block',width:'100%',padding:13,margin:'8px 0',textAlign:'left',border:'1px solid #ddd',borderRadius:10,background:language===name?'#fff0df':'white',color:'#102b46'}}>{flag} {name} {language===name?'✓':''}</button>)}
         </>}
         {page === 'settings-help' && (() => {
           const uid = currentUserId;
           return <>
-            <h3>Help Center / सहायता केन्द्र</h3>
+            <h3>{tr('Help Center / सहायता केन्द्र' )}</h3>
             <div style={{display:'grid',gap:10,marginBottom:16}}>
               <a href="https://m.me/61595956204923" target="_blank" rel="noopener noreferrer" style={{display:'block',padding:14,borderRadius:10,background:'#1877F2',color:'white',textAlign:'center',textDecoration:'none',fontWeight:'bold'}}>
                 f Facebook Messenger
@@ -2926,15 +3570,15 @@ const tr = (text) => featureTranslations[language]?.[text] || translations[langu
                   </select>
                 </label>
                 <label>विषय
-                  <input name="subject" required maxLength={120} placeholder="समस्या छोटकरीमा लेख्नुहोस्" style={{display:'block',boxSizing:'border-box',width:'100%',padding:12,margin:'6px 0 12px'}} />
+                  <input name="subject" required maxLength={120} placeholder={tr('समस्या छोटकरीमा लेख्नुहोस्')} style={{display:'block',boxSizing:'border-box',width:'100%',padding:12,margin:'6px 0 12px'}} />
                 </label>
                 <label>विवरण / सन्देश
-                  <textarea name="body" required maxLength={5000} placeholder="आफ्नो समस्या वा गुनासो लेख्नुहोस्" rows={4} style={{display:'block',boxSizing:'border-box',width:'100%',padding:12,margin:'6px 0 12px'}} />
+                  <textarea name="body" required maxLength={5000} placeholder={tr('आफ्नो समस्या वा गुनासो लेख्नुहोस्')} rows={4} style={{display:'block',boxSizing:'border-box',width:'100%',padding:12,margin:'6px 0 12px'}} />
                 </label>
-                <button className="primary" type="submit">Admin लाई पठाउनुहोस्</button>
+                <button className="primary" type="submit">{tr('Admin लाई पठाउनुहोस्' )}</button>
               </form>
-              {uid && <><h3>मेरा सहायता अनुरोधहरू</h3>
-              <button type="button" onClick={() => setForm(old => ({...old,supportRefresh:Date.now()}))}>रिफ्रेस गर्नुहोस्</button>
+              {uid && <><h3>{tr('मेरा सहायता अनुरोधहरू' )}</h3>
+              <button type="button" onClick={() => setForm(old => ({...old,supportRefresh:Date.now()}))}>{tr('रिफ्रेस गर्नुहोस्' )}</button>
               {(() => {
                 const [unused] = [null];
                 return <SupportInbox supabase={supabase} uid={uid} refresh={form.supportRefresh || 0} setMessage={setMessage} />;
@@ -2943,11 +3587,11 @@ const tr = (text) => featureTranslations[language]?.[text] || translations[langu
           </>;
         })()}
         {page === 'settings-city' && <>
-          <h3>City / सहर</h3>
+          <h3>{tr('City / सहर' )}</h3>
           <label>आफ्नो सहर
             <input value={form.city || ''} onChange={e => setForm({...form,city:e.target.value})} placeholder="जस्तै: Kathmandu" style={{display:'block',width:'100%',boxSizing:'border-box',padding:13,marginTop:8}}/>
           </label>
-          <button type="button" className="primary" onClick={() => setMessage(form.city ? 'सहर छानियो: '+form.city+' (अहिले यो सत्रमा मात्र)' : 'पहिले सहर लेख्नुहोस्।')}>Save City</button>
+          <button type="button" className="primary" onClick={() => setMessage(form.city ? 'सहर छानियो: '+form.city+' (अहिले यो सत्रमा मात्र)' : 'पहिले सहर लेख्नुहोस्।')}>{tr('Save City' )}</button>
         </>}
         {page === 'settings-history' && (() => {
           const historyVehicleBookings = vehicleBookings.filter(r => ['completed', 'cancelled'].includes(r.status));
@@ -2956,15 +3600,15 @@ const tr = (text) => featureTranslations[language]?.[text] || translations[langu
           const kilometers = completed.reduce((sum, b) => sum + (Number(b.actual_distance_km) || 0), 0);
           const money = n => 'रु. ' + n.toLocaleString('en-IN', { maximumFractionDigits: 2 });
           return <>
-            <h3>Request History / अनुरोध इतिहास</h3>
+            <h3>{tr('Request History / अनुरोध इतिहास' )}</h3>
             {historyError && <p style={{color:'#b91c1c'}}>{historyError}</p>}
             <div className="stats">
-              <div><b>{completed.length}</b><span>पूरा भएका ढुवानी</span></div>
-              <div><b>{money(earnings)}</b><span>वास्तविक कमाइ</span></div>
-              <div><b>{kilometers.toLocaleString('en-IN', {maximumFractionDigits:2})} km</b><span>वास्तविक दूरी</span></div>
+              <div><b>{completed.length}</b><span>{tr('पूरा भएका ढुवानी' )}</span></div>
+              <div><b>{money(earnings)}</b><span>{tr('वास्तविक कमाइ' )}</span></div>
+              <div><b>{kilometers.toLocaleString('en-IN', {maximumFractionDigits:2})} km</b><span>{tr('वास्तविक दूरी' )}</span></div>
             </div>
             <h4>🗺️ म्यापबाट भएका बुकिङ</h4>
-        {historyVehicleBookings.length === 0 && <p>म्याप बुकिङ इतिहास छैन।</p>}
+        {historyVehicleBookings.length === 0 && <p>{tr('म्याप बुकिङ इतिहास छैन।' )}</p>}
         {historyVehicleBookings.map(r => <div key={'history-map-'+r.id} style={{border:'1px solid #ddd',borderRadius:10,padding:12,margin:'10px 0'}}>
           <b>{r.vehicle_name || r.vehicle_type || 'मालवाहक गाडी'}</b>
           <p>उठाउने स्थान: {r.pickup_location || 'उल्लेख छैन'} → गन्तव्य: {r.destination || 'उल्लेख छैन'}</p>
@@ -2972,10 +3616,10 @@ const tr = (text) => featureTranslations[language]?.[text] || translations[langu
           <p>मिति: {new Date(r.created_at).toLocaleDateString()}</p>
           <p style={{display:'inline-block',padding:'6px 12px',borderRadius:20,fontWeight:700,background:({pending:'#EFF6FF',accepted:'#FFF7E8',rejected:'#F3F4F6',completed:'#ECFDF3',cancelled:'#FEF2F2'}[r.status]||'#F3F4F6'),color:({pending:'#2563EB',accepted:'#B45309',rejected:'#6B7280',completed:'#15803D',cancelled:'#DC2626'}[r.status]||'#374151')}}>स्थिति: {{pending:'🕒 निर्णय बाँकी',accepted:'🤝 स्वीकार भयो',rejected:'❌ अस्वीकार भयो',completed:'✅ डेलिभरी पूरा',cancelled:'❌ रद्द भयो'}[r.status] || r.status}</p>
           <p>प्रस्तावित भाडा: {r.proposed_fare == null ? 'रेकर्ड छैन' : money(Number(r.proposed_fare))}</p>
-          <p>वास्तविक दूरी र कमाइ: रेकर्ड छैन</p>
+          <p>{tr('वास्तविक दूरी र कमाइ: रेकर्ड छैन' )}</p>
         </div>)}
-        <h4>बुकिङ तथा ढुवानी</h4>
-            {historyBookings.length === 0 && !historyError && <p>अहिलेसम्म बुकिङ इतिहास छैन।</p>}
+        <h4>{tr('बुकिङ तथा ढुवानी' )}</h4>
+            {historyBookings.length === 0 && !historyError && <p>{tr('अहिलेसम्म बुकिङ इतिहास छैन।' )}</p>}
             {historyBookings.map(b => {
               const load = historyLoads.find(l => l.id === b.load_id);
               return <div key={b.id} style={{border:'1px solid #ddd',borderRadius:10,padding:12,margin:'10px 0'}}>
@@ -2987,8 +3631,8 @@ const tr = (text) => featureTranslations[language]?.[text] || translations[langu
                 <p>वास्तविक भाडा: {b.actual_fare == null ? 'रेकर्ड छैन' : money(Number(b.actual_fare))}</p>
               </div>;
             })}
-            <h4>मैले पोस्ट गरेका लोड</h4>
-            {historyLoads.length === 0 && <p>पोस्ट गरेका लोड छैनन्।</p>}
+            <h4>{tr('मैले पोस्ट गरेका लोड' )}</h4>
+            {historyLoads.length === 0 && <p>{tr('पोस्ट गरेका लोड छैनन्।' )}</p>}
             {historyLoads.map(l => {
               const expired = l.status === 'open' && l.expires_at && new Date(l.expires_at).getTime() <= Date.now();
               const shownStatus = expired ? 'expired' : l.status;
@@ -2998,7 +3642,7 @@ const tr = (text) => featureTranslations[language]?.[text] || translations[langu
               <p>मिति: {new Date(l.created_at).toLocaleDateString()}</p>
               <p style={{display:'inline-block',padding:'6px 12px',borderRadius:20,fontWeight:700,background:({completed:'#ECFDF3',cancelled:'#FEF2F2',open:'#EFF6FF',expired:'#F3F4F6',accepted:'#FFF7E8',rejected:'#F3F4F6',in_transit:'#EFF6FF'}[shownStatus]||'#F3F4F6'),color:({completed:'#15803D',cancelled:'#DC2626',open:'#2563EB',expired:'#6B7280',accepted:'#B45309',rejected:'#6B7280',in_transit:'#2563EB'}[shownStatus]||'#374151')}}>स्थिति: {{completed:'✅ डेलिभरी पूरा',cancelled:'❌ रद्द भयो',open:'🕒 खुला',expired:'⌛ म्याद सकियो',accepted:'🤝 स्वीकार भयो',rejected:'❌ अस्वीकार भयो',in_transit:'🚚 ढुवानी हुँदैछ'}[shownStatus] || shownStatus}</p>
               <p>प्रस्तावित भाडा: {l.proposed_price == null ? 'उपलब्ध छैन' : money(Number(l.proposed_price))}</p>
-              {l.status === 'open' && !expired && <button type="button" onClick={() => cancelLoadPost(l)} style={{background:'#b91c1c',color:'white',border:0,borderRadius:8,padding:'10px 14px',marginTop:6}}>पोस्ट रद्द गर्नुहोस्</button>}
+              {l.status === 'open' && !expired && <button type="button" onClick={() => cancelLoadPost(l)} style={{background:'#b91c1c',color:'white',border:0,borderRadius:8,padding:'10px 14px',marginTop:6}}>{tr('पोस्ट रद्द गर्नुहोस्' )}</button>}
               {expired && <button type="button" onClick={() => repostExpiredLoad(l)} style={{background:'#ea580c',color:'white',border:0,borderRadius:8,padding:'10px 14px',marginTop:6}}>🔄 फेरि पोस्ट गर्नुहोस्</button>}
             </div>;
             })}
@@ -3009,8 +3653,8 @@ const tr = (text) => featureTranslations[language]?.[text] || translations[langu
       {message && <div className="notice">✓ {tr(message)}</div>}
 
 
-      {page !== "home" && <button type="button" aria-label="पछाडि फर्कनुहोस्" onClick={goBack} style={floatingBack}>‹</button>}
-      <footer>LOAD · LM LOGISTICS & CARGO <small>{tr('ढुवानीको सजिलो साथी')}</small></footer>
+      {renderBackButton()}
+      <footer>LoadMitra Logistics <small>{tr('ढुवानीको सजिलो साथी')}</small></footer>
     </div>
     </>
   );

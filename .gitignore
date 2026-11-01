@@ -28,3 +28,11 @@ src-google-backup.jsx
 src-language-backup.jsx
 src.jsx.*
 style.css.backup
+
+# Private signing keys
+keystore/
+*.jks
+*.keystore
+
+# Private Android signing credentials
+android/key.properties
