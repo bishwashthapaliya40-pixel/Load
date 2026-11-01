@@ -31,7 +31,7 @@ jobs:
         run: npm run build
         env:
           VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
-          VITE_SUPABASE_PUBLISHABLE_KEY: ${{ secrets.VITE_SUPABASE_PUBLISHABLE_KEY }}
+          VITE_SUPABASE_PUBLISHABLE_KEY: ${{ secrets.VITE_SUPABASE_PUBLISH AB,E_KEY }}
 
       - name: Sync Android
         run: npx cap sync android
@@ -43,12 +43,18 @@ jobs:
           KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
+          test -n "$KEYSTORE_BASE64"
+          test -n "$KEYSTORE_PASSWORD"
+          test -n "$KEY_ALIAS"
+          test -n "$KEY_PASSWORD"
           mkdir -p android/keystore
           printf '%s' "$KEYSTORE_BASE64" | base64 --decode > android/keystore/loadmitra-release.jks
+          test -s android/keystore/loadmitra-release.jks
           printf 'storeFile=../keystore/loadmitra-release.jks\nstorePassword=%s\nkeyAlias=%s\nkeyPassword=%s\n' "$KEYSTORE_PASSWORD" "$KEY_ALIAS" "$KEY_PASSWORD" > android/key.properties
 
       - name: Verify keystore file
         run: sha256sum android/keystore/loadmitra-release.jks
+
       - name: Build APK and AAB
         working-directory: android
         run: chmod +x gradlew && ./gradlew assembleDebug bundleRelease
